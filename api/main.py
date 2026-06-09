@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -26,6 +27,20 @@ from engine.orchestrator import build_graph
 
 load_dotenv()
 
+
+def _async_engine_from_url(raw: str):
+    """Build an asyncpg-compatible engine, stripping params asyncpg doesn't accept."""
+    parsed = urlparse(raw)
+    params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+    # Collect SSL intent before stripping, then pass via connect_args
+    ssl_val = params.pop("ssl", None) or ("require" if params.pop("sslmode", None) else None)
+    for unsupported in ("channel_binding", "options"):
+        params.pop(unsupported, None)
+    clean_url = urlunparse(parsed._replace(query=urlencode(params)))
+    kwargs = {"connect_args": {"ssl": ssl_val}} if ssl_val else {}
+    return create_async_engine(clean_url, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # App-lifetime globals (set in lifespan, used by route handlers)
 # ---------------------------------------------------------------------------
@@ -38,7 +53,7 @@ _checkpointer = None
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     global _session_factory, _graph, _checkpointer
 
-    engine = create_async_engine(os.environ["DATABASE_URL"])
+    engine = _async_engine_from_url(os.environ["DATABASE_URL"])
     _session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with get_checkpointer() as cp:
