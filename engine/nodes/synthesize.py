@@ -41,8 +41,10 @@ def _format_findings(findings: list[dict[str, str]]) -> str:
 
 
 def synthesize(state: ResearchState) -> dict[str, str]:
-    """Write a cited Markdown report from all accumulated findings (synthesize node)."""
-    findings_text = _format_findings(state.get("findings", []))  # type: ignore[arg-type]
+    """Write a cited Markdown report from compacted summary or raw findings (synthesize node)."""
+    # Prefer the compacted summary (layer 2) — fall back to raw findings if compact was skipped
+    summary = state.get("summary", "")
+    findings_text = summary if summary else _format_findings(state.get("findings", []))  # type: ignore[arg-type]
     llm: ChatOpenAI = ChatOpenAI(model=LEAD_MODEL, temperature=0)
     chain = _PROMPT | llm
     result: BaseMessage = chain.invoke(  # type: ignore[assignment]

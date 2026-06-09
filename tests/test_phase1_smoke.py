@@ -53,10 +53,13 @@ def test_state_structure() -> None:
     state: ResearchState = {
         "run_id": str(uuid.uuid4()),
         "query": "What is quantum computing?",
+        "clarification_questions": [],
+        "clarifications": [],
         "subtasks": [],
         "findings": [],
         "summary": "",
         "report": "",
+        "messages": [],
     }
     assert state["query"] == "What is quantum computing?"
     assert state["findings"] == []

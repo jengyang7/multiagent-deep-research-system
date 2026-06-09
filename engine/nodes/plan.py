@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 from engine.models import LEAD_MODEL
 from engine.state import ResearchState
