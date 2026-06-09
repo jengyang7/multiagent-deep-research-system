@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -129,7 +130,7 @@ async def _update_run(run_id: str, status: str, **kwargs: object) -> None:
 # ---------------------------------------------------------------------------
 
 def _evt(data: dict) -> dict[str, str]:
-    return {"data": json.dumps(data)}
+    return {"data": json.dumps({**data, "ts": time.time()})}
 
 
 async def _stream_graph(
@@ -190,17 +191,21 @@ async def _stream_graph(
         snapshot = await _graph.aget_state(config)
 
         if snapshot.next:
-            # Graph is paused — read clarification questions from state.
+            # Graph is paused — read clarification questions + chip options from state.
             questions: list[str] = snapshot.values.get("clarification_questions", [])  # type: ignore[union-attr]
+            options: list[list[str]] = snapshot.values.get("clarification_options", [])  # type: ignore[union-attr]
             if questions:
                 await _update_run(
                     run_id,
                     "awaiting_clarification",
                     clarifications={"questions": questions, "answers": []},
                 )
-                yield _evt(
-                    {"type": "clarification_needed", "run_id": run_id, "questions": questions}
-                )
+                yield _evt({
+                    "type": "clarification_needed",
+                    "run_id": run_id,
+                    "questions": questions,
+                    "options": options,
+                })
                 return
 
         # Graph completed normally.
@@ -229,6 +234,7 @@ async def start_research(body: ResearchRequest) -> EventSourceResponse:
         "run_id": run_id,
         "query": body.query,
         "clarification_questions": [],
+        "clarification_options": [],
         "clarifications": [],
         "supervisor_thinking": "",
         "subtasks": [],

@@ -6,12 +6,12 @@ import remarkGfm from 'remark-gfm';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
-type Phase = 'idle' | 'clarifying' | 'researching' | 'done' | 'error';
+type Phase = 'idle' | 'querying' | 'clarifying' | 'researching' | 'done' | 'error';
 type LogType = 'start' | 'plan' | 'subtask' | 'synthesis' | 'report' | 'complete' | 'clarify' | 'error';
 
 interface SubtaskState { question: string; status: 'pending' | 'done'; findingsCount: number; }
 interface ChatMessage  { role: 'user' | 'assistant'; content: string; }
-interface LogEntry     { id: number; type: LogType; label: string; detail?: string; ts: string; createdAt: number; }
+interface LogEntry     { id: number; type: LogType; label: string; detail?: string; ts: string; createdAt: number; serverTs?: number; }
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,8 +47,8 @@ function nowTs() {
 }
 
 let _lid = 0;
-function mkLog(type: LogType, label: string, detail?: string): LogEntry {
-  return { id: ++_lid, type, label, detail, ts: nowTs(), createdAt: Date.now() };
+function mkLog(type: LogType, label: string, detail?: string, serverTs?: number): LogEntry {
+  return { id: ++_lid, type, label, detail, ts: nowTs(), createdAt: Date.now(), serverTs };
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +155,7 @@ export default function Home() {
   const [showReport, setShowReport] = useState(false);
 
   const [clarifyQuestions, setClarifyQuestions] = useState<string[]>([]);
+  const [clarifyOptions,   setClarifyOptions]   = useState<string[][]>([]);
   const [clarifyAnswers,   setClarifyAnswers]   = useState<string[]>([]);
 
   const [subtasks, setSubtasks] = useState<SubtaskState[]>([]);
@@ -172,6 +173,7 @@ export default function Home() {
   const [supervisorThinkingExpanded, setSupervisorThinkingExpanded] = useState(false);
   const [synthesizingActive,         setSynthesizingActive]         = useState(false);
   const [researchEndTime,            setResearchEndTime]            = useState<number | null>(null);
+  const [copied,                     setCopied]                     = useState(false);
 
   const logEndRef  = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -198,8 +200,9 @@ export default function Home() {
       setReport(s.report ?? '');
       setShowReport(s.showReport ?? false);
       setChatMessages(s.chatMessages ?? []);
-      // Mid-research can't resume the stream — show done if report exists, else idle
-      const p: Phase = s.phase === 'researching'
+      // Transient phases can't be resumed after a refresh — reset them
+      const transient: Phase[] = ['researching', 'querying', 'clarifying'];
+      const p: Phase = transient.includes(s.phase)
         ? (s.report ? 'done' : 'idle')
         : (s.phase ?? 'idle');
       setPhase(p);
@@ -231,8 +234,8 @@ export default function Home() {
   // Helpers
   // -------------------------------------------------------------------------
 
-  function addLog(type: LogType, label: string, detail?: string) {
-    setLog(prev => [...prev, mkLog(type, label, detail)]);
+  function addLog(type: LogType, label: string, detail?: string, serverTs?: number) {
+    setLog(prev => [...prev, mkLog(type, label, detail, serverTs)]);
   }
 
   function toggleExpand(id: number) {
@@ -245,13 +248,17 @@ export default function Home() {
 
   function handleEvent(data: Record<string, unknown>) {
     const type = data.type as string;
+    // Convert server unix timestamp (seconds) to ms for consistent timing
+    const serverTs = data.ts ? (data.ts as number) * 1000 : undefined;
     if (type === 'started') {
       setRunId(data.run_id as string);
-      addLog('start', 'Initialization');
+      addLog('start', 'Initialization', undefined, serverTs);
     } else if (type === 'plan_thinking') {
+      setPhase('researching');
       setSupervisorThinking(data.content as string);
-      addLog('plan', 'Research Planning', data.content as string);
+      addLog('plan', 'Research Planning', data.content as string, serverTs);
     } else if (type === 'plan') {
+      setPhase(p => (p === 'querying' ? 'researching' : p));
       const qs = (data.subtasks as string[]) ?? [];
       setSubtasks(qs.map(q => ({ question: q, status: 'pending', findingsCount: 0 })));
     } else if (type === 'subtask_done') {
@@ -260,33 +267,34 @@ export default function Home() {
       const srcs  = (data.sources as string[]) ?? [];
       setSubtasks(prev => prev.map(s => s.question === q ? { ...s, status: 'done', findingsCount: count } : s));
       setSources(prev => { const set = new Set(prev); srcs.forEach(s => set.add(s)); return [...set]; });
-      // Never auto-switch tab — user controls right panel
-      addLog('subtask', 'Research Execution', `${count} finding${count !== 1 ? 's' : ''} · ${q.slice(0, 80)}${q.length > 80 ? '…' : ''}`);
+      addLog('subtask', 'Research Execution', `${count} finding${count !== 1 ? 's' : ''} · ${q.slice(0, 80)}${q.length > 80 ? '…' : ''}`, serverTs);
     } else if (type === 'synthesizing') {
       setSynthesizingActive(true);
-      addLog('synthesis', 'Synthesizing Findings');
+      addLog('synthesis', 'Synthesizing Findings', undefined, serverTs);
     } else if (type === 'clarification_needed') {
       const qs = (data.questions as string[]) ?? [];
+      const opts = (data.options as string[][]) ?? [];
       setRunId(data.run_id as string);
       setClarifyQuestions(qs);
+      setClarifyOptions(opts);
       setClarifyAnswers(new Array(qs.length).fill(''));
       setPhase('clarifying');
-      addLog('clarify', 'Clarification Required', `${qs.length} question${qs.length !== 1 ? 's' : ''} to answer`);
+      addLog('clarify', 'Clarification Required', `${qs.length} question${qs.length !== 1 ? 's' : ''} to answer`, serverTs);
     } else if (type === 'report') {
       setSynthesizingActive(false);
       setReport(data.content as string);
       setShowReport(true);
-      addLog('report', 'Final Report');
+      addLog('report', 'Final Report', undefined, serverTs);
     } else if (type === 'done') {
+      const endTs = serverTs ?? Date.now();
       setPhase('done');
-      setResearchEndTime(Date.now());
-      // Mark any subtasks that didn't receive a done event (e.g. first N stayed pending)
+      setResearchEndTime(endTs);
       setSubtasks(prev => prev.map(s => s.status === 'pending' ? { ...s, status: 'done' } : s));
-      addLog('complete', 'Completed');
+      addLog('complete', 'Completed', undefined, serverTs);
     } else if (type === 'error') {
       setError(data.message as string);
       setPhase('error');
-      addLog('error', 'Error', data.message as string);
+      addLog('error', 'Error', data.message as string, serverTs);
     }
   }
 
@@ -296,11 +304,12 @@ export default function Home() {
 
   async function startResearch() {
     if (!query.trim()) return;
-    setPhase('researching');
+    setPhase('querying');
     setSubtasks([]); setSources([]); setReport(''); setShowReport(false);
     setError(''); setChatMessages([]); setRunId('');
     setSupervisorThinking(''); setSupervisorThinkingExpanded(false);
     setSynthesizingActive(false); setResearchEndTime(null);
+    setClarifyQuestions([]); setClarifyOptions([]); setClarifyAnswers([]);
     setLog([mkLog('start', 'Initialization', `Query: ${query.trim().slice(0, 120)}`)]);
     setRightTab('steps');
     setExpandedLogs(new Set());
@@ -316,7 +325,7 @@ export default function Home() {
 
   async function submitClarification() {
     if (clarifyAnswers.some(a => !a.trim())) return;
-    setPhase('researching');
+    setPhase('querying');
     addLog('clarify', 'Answers submitted');
     try {
       const res = await fetch(`${API}/runs/${runId}/resume`, {
@@ -358,8 +367,17 @@ export default function Home() {
     setReport(''); setShowReport(false); setChatMessages([]);
     setRunId(''); setLog([]); setError(''); setExpandedLogs(new Set());
     setSupervisorThinking(''); setSupervisorThinkingExpanded(false);
-    setSynthesizingActive(false); setResearchEndTime(null);
+    setSynthesizingActive(false); setResearchEndTime(null); setCopied(false);
+    setClarifyOptions([]);
     try { sessionStorage.removeItem('dra_session_v1'); } catch { /* ignore */ }
+  }
+
+  function copyReport() {
+    if (!report) return;
+    navigator.clipboard.writeText(report).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -373,70 +391,113 @@ export default function Home() {
 
       <div className="flex-1 flex flex-col min-w-0">
 
-        {/* ═══════════ IDLE / ERROR ═══════════ */}
-        {(phase === 'idle' || phase === 'error') && (
+        {/* ═══════════ IDLE / QUERYING / CLARIFYING / ERROR ═══════════ */}
+        {(phase === 'idle' || phase === 'querying' || phase === 'clarifying' || phase === 'error') && (
           <div className="flex-1 flex flex-col">
-            <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center">
-              <span className="text-5xl mb-2">🔍</span>
-              <h2 className="text-2xl font-bold text-gray-900">Start Your Research</h2>
-              <p className="text-gray-400 text-sm max-w-md">
-                Ask a question to begin comprehensive AI-powered research
-              </p>
-              {phase === 'error' && (
-                <p className="mt-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2 max-w-lg">
-                  {error}
-                </p>
-              )}
-            </div>
-            <div className="border-t border-gray-200 px-6 py-4">
-              <div className="flex items-center gap-3 max-w-3xl mx-auto">
-                <input
-                  value={query}
-                  onChange={e => setQuery(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && startResearch()}
-                  placeholder="What are the top AI trends shaping 2026?"
-                  className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors"
-                />
-                <button
-                  onClick={startResearch}
-                  disabled={!query.trim()}
-                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl px-5 py-3 text-sm font-semibold transition-colors whitespace-nowrap"
-                >
-                  <SendIcon /> Research
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
 
-        {/* ═══════════ CLARIFYING ═══════════ */}
-        {phase === 'clarifying' && (
-          <div className="flex-1 flex items-center justify-center p-6">
-            <div className="w-full max-w-lg bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-5">
-              <div>
-                <h2 className="font-semibold text-gray-900">Clarifying questions</h2>
-                <p className="text-xs text-gray-400 mt-0.5">Your query is ambiguous — answers help narrow the research focus.</p>
-              </div>
-              {clarifyQuestions.map((q, i) => (
-                <div key={i} className="space-y-1.5">
-                  <label className="text-sm font-medium text-gray-700">{q}</label>
+            {phase !== 'clarifying' ? (
+              /* ── Home: hero + centered input ── */
+              <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
+                <span className="text-5xl mb-1">🔍</span>
+                <h2 className="text-2xl font-bold text-gray-900">Start Your Research</h2>
+                <p className="text-gray-400 text-sm max-w-md">
+                  Ask a question to begin comprehensive AI-powered research
+                </p>
+                {phase === 'error' && (
+                  <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2 max-w-lg">
+                    {error}
+                  </p>
+                )}
+                <div className="flex items-center gap-3 w-full max-w-2xl mt-2">
                   <input
-                    value={clarifyAnswers[i]}
-                    onChange={e => { const a = [...clarifyAnswers]; a[i] = e.target.value; setClarifyAnswers(a); }}
-                    onKeyDown={e => e.key === 'Enter' && !clarifyAnswers.some(a => !a.trim()) && submitClarification()}
-                    placeholder="Your answer…"
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500"
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && phase === 'idle' && startResearch()}
+                    placeholder="What are the top AI trends shaping 2026?"
+                    disabled={phase === 'querying'}
+                    className="flex-1 border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors disabled:bg-gray-50 disabled:text-gray-600 disabled:cursor-default"
                   />
+                  <button
+                    onClick={startResearch}
+                    disabled={!query.trim() || phase === 'querying'}
+                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl px-5 py-3 text-sm font-semibold transition-colors whitespace-nowrap"
+                  >
+                    {phase === 'querying' ? <><Spinner /> Thinking…</> : <><SendIcon /> Research</>}
+                  </button>
                 </div>
-              ))}
-              <button
-                onClick={submitClarification}
-                disabled={clarifyAnswers.some(a => !a.trim())}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-2.5 text-sm font-semibold transition-colors"
-              >
-                Continue Research
-              </button>
-            </div>
+              </div>
+            ) : (
+              /* ── Clarification questions ── */
+              <div className="flex-1 overflow-y-auto flex flex-col justify-center px-6 py-8">
+                <div className="max-w-2xl mx-auto w-full">
+                  <div className="border border-gray-200 rounded-2xl shadow-sm bg-white overflow-hidden">
+
+                    {/* Card header */}
+                    <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-gray-100">
+                      <div>
+                        <p className="text-base font-semibold text-gray-900">A few questions to focus the research</p>
+                        <p className="text-xs text-gray-400 mt-0.5">Tap an option or type a custom answer</p>
+                      </div>
+                      <button
+                        onClick={() => { setPhase('idle'); setClarifyQuestions([]); setClarifyOptions([]); setClarifyAnswers([]); }}
+                        className="ml-4 mt-0.5 flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-full text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                        aria-label="Cancel"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {/* Card body */}
+                    <div className="px-6 py-5 space-y-7">
+                  {clarifyQuestions.map((q, i) => {
+                    const chips = clarifyOptions[i] ?? [];
+                    const isChipSelected = chips.includes(clarifyAnswers[i] ?? '');
+                    const customVal = isChipSelected ? '' : (clarifyAnswers[i] ?? '');
+                    return (
+                      <div key={i}>
+                        <p className="text-sm font-medium text-gray-800 mb-3">{q}</p>
+                        {chips.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            {chips.map((opt, j) => (
+                              <button
+                                key={j}
+                                onClick={() => { const a = [...clarifyAnswers]; a[i] = opt; setClarifyAnswers(a); }}
+                                className={`px-4 py-1.5 rounded-full border text-sm font-medium transition-colors ${
+                                  clarifyAnswers[i] === opt
+                                    ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                                    : 'bg-white border-gray-300 text-gray-700 hover:border-blue-400 hover:text-blue-600'
+                                }`}
+                              >
+                                {opt}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <input
+                          value={customVal}
+                          onChange={e => { const a = [...clarifyAnswers]; a[i] = e.target.value; setClarifyAnswers(a); }}
+                          onKeyDown={e => e.key === 'Enter' && !clarifyAnswers.some(a => !a.trim()) && submitClarification()}
+                          placeholder="Other… (type a custom answer)"
+                          className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-700 bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400 placeholder:text-gray-400"
+                        />
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    onClick={submitClarification}
+                    disabled={clarifyAnswers.some(a => !a.trim())}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-semibold transition-colors"
+                  >
+                    Start Research
+                  </button>
+                    </div>{/* /card body */}
+                  </div>{/* /card */}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -489,7 +550,35 @@ export default function Home() {
 
                 {/* Query heading */}
                 <div className="px-8 pt-7 pb-5 border-b border-gray-100">
-                  <h2 className="text-2xl font-bold text-gray-900 leading-snug">{displayQuery}</h2>
+                  <div className="flex items-start justify-between gap-4">
+                    <h2 className="text-2xl font-bold text-gray-900 leading-snug">{displayQuery}</h2>
+                    {report && (
+                      <button
+                        onClick={copyReport}
+                        className={`flex-shrink-0 flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-1.5 border transition-colors ${
+                          copied
+                            ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                            : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400 hover:text-gray-800'
+                        }`}
+                      >
+                        {copied ? (
+                          <>
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                            Copy Report
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
                   {phase === 'researching' && (
                     <p className="mt-2 flex items-center gap-1.5 text-sm text-blue-600">
                       <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" /> Researching…
@@ -533,8 +622,7 @@ export default function Home() {
                           onClick={() => setSupervisorThinkingExpanded(v => !v)}
                           className="mt-1.5 text-blue-600 hover:text-blue-800 text-xs flex items-center gap-1 font-medium"
                         >
-                          <span className="text-[10px]">▶</span>
-                          <span className="text-[10px]">▼</span>
+                          <span className="text-[10px]">{supervisorThinkingExpanded ? '▼' : '▶'}</span>
                           {supervisorThinkingExpanded ? 'Hide full content' : 'Show full content'}
                         </button>
                       )}
@@ -714,13 +802,15 @@ export default function Home() {
                         {log.map((entry, i) => {
                           const expanded = expandedLogs.has(entry.id);
                           const isLast = i === log.length - 1;
-                          // Use researchEndTime for last step when research is finished
-                          const endMs = isLast
-                            ? (researchEndTime ?? (phase !== 'researching' ? Date.now() : null))
-                            : log[i + 1].createdAt;
-                          const durationMs = endMs !== null ? endMs - entry.createdAt : null;
-                          const durSec   = durationMs !== null ? (durationMs / 1000).toFixed(1) : null;
-                          const totalSec = log[0] ? ((entry.createdAt - log[0].createdAt) / 1000).toFixed(1) : '0.0';
+                          // Use server timestamps when available for accurate per-step timing
+                          const getTs = (e: LogEntry) => e.serverTs ?? e.createdAt;
+                          const endTs = isLast ? researchEndTime : getTs(log[i + 1]);
+                          const durationMs = endTs !== null && endTs !== undefined ? endTs - getTs(entry) : null;
+                          const durSec = durationMs === null
+                            ? null
+                            : durationMs < 100 ? '< 0.1' : (durationMs / 1000).toFixed(1);
+                          const firstTs = log[0] ? getTs(log[0]) : getTs(entry);
+                          const totalSec = ((getTs(entry) - firstTs) / 1000).toFixed(1);
                           return (
                             <div key={entry.id} className="flex gap-3 py-2.5 relative">
                               <div className="flex-shrink-0 z-10">

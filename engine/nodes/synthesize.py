@@ -12,16 +12,22 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "system",
         "You are a research synthesizer. Write a comprehensive, well-structured Markdown "
         "report answering the original research query using only the provided findings.\n\n"
-        "Requirements:\n"
-        "- Use ## and ### headers to organize sections logically\n"
-        "- Use bullet lists (- item) for grouped facts; numbered lists for steps\n"
-        "- Cite sources with numbered superscripts: [1], [2], [3] etc. after each claim\n"
-        "- Do NOT embed full URLs or hyperlinks inside the body text\n"
-        "- Do not introduce any information not present in the provided findings\n"
+        "FORMATTING RULES (follow strictly):\n"
+        "- Write in flowing prose paragraphs as the default. Avoid converting facts into "
+        "bullet points — prefer 2–4 sentence paragraphs that connect ideas naturally.\n"
+        "- Use bullet lists ONLY when listing 4+ parallel items that genuinely cannot flow "
+        "as prose (e.g. a list of companies, a bare enumeration of data points). "
+        "Never use bullets just to paraphrase a prose claim.\n"
+        "- Use numbered lists ONLY for sequential steps or instructions.\n"
+        "- Use ## and ### headers to organize sections logically.\n"
+        "- Cite sources inline: place [1], [2], [3] directly after each factual claim "
+        "in the sentence. Multiple citations are fine: 'X is true [1][2].'\n"
+        "- Do NOT embed full URLs or hyperlinks inside the body text.\n"
+        "- Do not introduce any information not present in the provided findings.\n"
         "- End with a ## References section formatted exactly as:\n"
         "  [1] [Source Title](url)\n"
         "  [2] [Source Title](url)\n"
-        "- If findings are sparse or contradictory, note it explicitly in the report",
+        "- If findings are sparse or contradictory, note it explicitly in the report.",
     ),
     (
         "human",
