@@ -1,0 +1,290 @@
+"""FastAPI server: POST /research (SSE), POST /runs/{id}/resume, GET /runs/{id}, POST /chat."""
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sse_starlette.sse import EventSourceResponse
+
+from db.models import ResearchRun
+from engine.memory.checkpointer import get_checkpointer
+from engine.nodes.chat import answer_followup
+from engine.orchestrator import build_graph
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# App-lifetime globals (set in lifespan, used by route handlers)
+# ---------------------------------------------------------------------------
+_session_factory: async_sessionmaker[AsyncSession] | None = None
+_graph: CompiledStateGraph | None = None  # type: ignore[type-arg]
+_checkpointer = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # type: ignore[type-arg]
+    global _session_factory, _graph, _checkpointer
+
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    _session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with get_checkpointer() as cp:
+        _checkpointer = cp
+        _graph = build_graph(cp)
+        yield
+
+    await engine.dispose()
+    _session_factory = None
+    _graph = None
+    _checkpointer = None
+
+
+app = FastAPI(title="Deep Research API", lifespan=lifespan)
+
+_allowed_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+    """Return JSON errors with CORS headers so the browser can read the body."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={"Access-Control-Allow-Origin": _allowed_origins[0] if _allowed_origins else "*"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+class ResearchRequest(BaseModel):
+    query: str
+
+
+class ResumeRequest(BaseModel):
+    answers: list[str]
+
+
+class ChatRequest(BaseModel):
+    thread_id: str
+    question: str
+    history: list[dict[str, str]] = []
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+async def _update_run(run_id: str, status: str, **kwargs: object) -> None:
+    assert _session_factory is not None
+    async with _session_factory() as session:
+        result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if run:
+            run.status = status
+            for k, v in kwargs.items():
+                setattr(run, k, v)
+            await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Core SSE stream generator (shared by /research and /runs/{id}/resume)
+# ---------------------------------------------------------------------------
+
+def _evt(data: dict) -> dict[str, str]:
+    return {"data": json.dumps(data)}
+
+
+async def _stream_graph(
+    run_id: str,
+    input_: dict | Command,  # type: ignore[type-arg]
+) -> AsyncGenerator[dict[str, str], None]:
+    """Stream LangGraph node updates as SSE events.
+
+    Events emitted (data field is JSON):
+      started             {type, run_id}
+      plan                {type, subtasks: [...]}
+      subtask_done        {type, question, findings_count}
+      report              {type, content, run_id}
+      clarification_needed {type, run_id, questions: [...]}
+      done                {type, run_id}
+      error               {type, message}
+    """
+    assert _graph is not None
+    config = {"configurable": {"thread_id": run_id}}
+
+    yield _evt({"type": "started", "run_id": run_id})
+
+    try:
+        await _update_run(run_id, "running")
+
+        async for chunk in _graph.astream(input_, config, stream_mode="updates"):  # type: ignore[misc]
+            for node_name, node_output in chunk.items():
+
+                if node_name == "plan":
+                    subtasks: list[str] = node_output.get("subtasks", [])  # type: ignore[union-attr]
+                    thinking: str = node_output.get("supervisor_thinking", "")  # type: ignore[union-attr]
+                    await _update_run(run_id, "running", plan={"subtasks": subtasks})
+                    if thinking:
+                        yield _evt({"type": "plan_thinking", "content": thinking})
+                    yield _evt({"type": "plan", "subtasks": subtasks})
+
+                elif node_name == "subagent":
+                    findings: list[dict] = node_output.get("findings", [])  # type: ignore[union-attr]
+                    question = findings[0]["subtask"] if findings else ""
+                    sources = list({
+                        f["citation_url"] for f in findings if f.get("citation_url")
+                    })
+                    yield _evt({
+                        "type": "subtask_done",
+                        "question": question,
+                        "findings_count": len(findings),
+                        "sources": sources,
+                    })
+
+                elif node_name == "compact":
+                    yield _evt({"type": "synthesizing"})
+
+                elif node_name == "synthesize":
+                    report: str = node_output.get("report", "")  # type: ignore[union-attr]
+                    yield _evt({"type": "report", "content": report, "run_id": run_id})
+
+        # After the loop: detect interrupt (clarification needed) vs normal completion.
+        snapshot = await _graph.aget_state(config)
+
+        if snapshot.next:
+            # Graph is paused — read clarification questions from state.
+            questions: list[str] = snapshot.values.get("clarification_questions", [])  # type: ignore[union-attr]
+            if questions:
+                await _update_run(
+                    run_id,
+                    "awaiting_clarification",
+                    clarifications={"questions": questions, "answers": []},
+                )
+                yield _evt(
+                    {"type": "clarification_needed", "run_id": run_id, "questions": questions}
+                )
+                return
+
+        # Graph completed normally.
+        await _update_run(run_id, "done", finished_at=datetime.now(timezone.utc))
+        yield _evt({"type": "done", "run_id": run_id})
+
+    except Exception as exc:
+        await _update_run(run_id, "failed")
+        yield _evt({"type": "error", "message": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/research")
+async def start_research(body: ResearchRequest) -> EventSourceResponse:
+    assert _session_factory is not None
+
+    run_id = str(uuid.uuid4())
+    async with _session_factory() as session:
+        session.add(ResearchRun(id=run_id, query=body.query, status="pending"))
+        await session.commit()
+
+    initial_state: dict[str, object] = {
+        "run_id": run_id,
+        "query": body.query,
+        "clarification_questions": [],
+        "clarifications": [],
+        "supervisor_thinking": "",
+        "subtasks": [],
+        "findings": [],
+        "summary": "",
+        "report": "",
+        "messages": [],
+    }
+    return EventSourceResponse(_stream_graph(run_id, initial_state))
+
+
+@app.post("/runs/{run_id}/resume")
+async def resume_run(run_id: str, body: ResumeRequest) -> EventSourceResponse:
+    assert _session_factory is not None
+    assert _graph is not None
+
+    async with _session_factory() as session:
+        result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if not run:
+            raise HTTPException(404, "Run not found")
+        if run.status != "awaiting_clarification":
+            raise HTTPException(400, f"Run is not awaiting clarification (status={run.status})")
+
+    return EventSourceResponse(_stream_graph(run_id, Command(resume=body.answers)))
+
+
+@app.get("/runs/{run_id}")
+async def get_run(run_id: str) -> dict[str, object]:
+    assert _session_factory is not None
+    assert _graph is not None
+
+    async with _session_factory() as session:
+        result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if not run:
+            raise HTTPException(404, "Run not found")
+
+    config = {"configurable": {"thread_id": run_id}}
+    snapshot = await _graph.aget_state(config)
+    report = ""
+    findings: list[object] = []
+    if snapshot:
+        report = snapshot.values.get("report", "")  # type: ignore[union-attr]
+        findings = snapshot.values.get("findings", [])  # type: ignore[union-attr]
+
+    return {
+        "id": run.id,
+        "query": run.query,
+        "status": run.status,
+        "plan": run.plan,
+        "clarifications": run.clarifications,
+        "report": report,
+        "findings": findings,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
+
+
+@app.post("/chat")
+async def chat(body: ChatRequest) -> EventSourceResponse:
+    assert _checkpointer is not None
+
+    async def stream() -> AsyncGenerator[dict[str, str], None]:
+        try:
+            async for chunk in answer_followup(
+                body.thread_id, body.question, body.history, _checkpointer
+            ):
+                yield _evt({"type": "chunk", "content": chunk})
+            yield _evt({"type": "done"})
+        except Exception as exc:
+            yield _evt({"type": "error", "message": str(exc)})
+
+    return EventSourceResponse(stream())

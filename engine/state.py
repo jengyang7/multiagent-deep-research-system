@@ -28,6 +28,8 @@ class ResearchState(TypedDict):
     clarification_questions: list[str]
     # Clarifying questions asked + user answers (human-in-the-loop, layer 3)
     clarifications: list[Clarification]
+    # Supervisor's free-text reasoning about how to approach the query (plan node)
+    supervisor_thinking: str
     # Sub-questions produced by the plan node
     subtasks: list[str]
     # operator.add reducer accumulates findings from all parallel subagents

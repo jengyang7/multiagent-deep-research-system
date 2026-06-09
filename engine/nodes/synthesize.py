@@ -14,9 +14,13 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "report answering the original research query using only the provided findings.\n\n"
         "Requirements:\n"
         "- Use ## and ### headers to organize sections logically\n"
-        "- Every claim must have an inline citation: [Source Title or number](url)\n"
+        "- Use bullet lists (- item) for grouped facts; numbered lists for steps\n"
+        "- Cite sources with numbered superscripts: [1], [2], [3] etc. after each claim\n"
+        "- Do NOT embed full URLs or hyperlinks inside the body text\n"
         "- Do not introduce any information not present in the provided findings\n"
-        "- End with a ## Sources section listing all unique URLs used\n"
+        "- End with a ## References section formatted exactly as:\n"
+        "  [1] [Source Title](url)\n"
+        "  [2] [Source Title](url)\n"
         "- If findings are sparse or contradictory, note it explicitly in the report",
     ),
     (

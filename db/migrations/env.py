@@ -22,6 +22,17 @@ from db.models import Base  # noqa: E402 — import after path is configured
 
 target_metadata = Base.metadata
 
+# LangGraph manages its own checkpoint tables — exclude them from autogenerate.
+_LANGGRAPH_TABLES = {
+    "checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"
+}
+
+
+def _include_object(obj, name, type_, reflected, compare_to):  # type: ignore[no-untyped-def]
+    if type_ == "table" and name in _LANGGRAPH_TABLES:
+        return False
+    return True
+
 
 def run_migrations_offline() -> None:
     context.configure(
@@ -29,6 +40,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -41,7 +53,11 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=_include_object,
+        )
         with context.begin_transaction():
             context.run_migrations()
 
