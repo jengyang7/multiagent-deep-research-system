@@ -134,7 +134,7 @@ function ModelPicker({
         type="button"
         onClick={() => setOpen(v => !v)}
         disabled={disabled}
-        className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg px-2.5 py-1.5 transition-colors disabled:cursor-default disabled:opacity-50"
+        className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg px-2.5 py-1.5 transition-colors disabled:cursor-default disabled:opacity-50 focus:outline-none"
       >
         {selected?.label ?? 'Model'}
         <svg className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -151,7 +151,7 @@ function ModelPicker({
                 key={opt.id}
                 type="button"
                 onClick={() => { onChange(opt.id); setOpen(false); }}
-                className={`flex w-full items-start gap-2 px-3.5 py-2.5 text-left transition-colors ${
+                className={`flex w-full items-start gap-2 px-3.5 py-2.5 text-left transition-colors focus:outline-none ${
                   isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'
                 }`}
               >
@@ -333,10 +333,10 @@ export default function Home() {
   // Mirrors engine/models.py LEAD_MODEL_OPTIONS — lets the picker render
   // immediately, before the (possibly cold-starting) backend responds.
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([
-    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Faster and cheaper' },
     { id: 'gpt-5.4', label: 'GPT-5.4', description: 'Best for complex topics' },
+    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Faster and cheaper' },
   ]);
-  const [selectedModel, setSelectedModel] = useState('gpt-5.4-mini');
+  const [selectedModel, setSelectedModel] = useState('gpt-5.4');
 
   const logEndRef  = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -658,7 +658,7 @@ export default function Home() {
                   </p>
                 )}
                 <div className="w-full max-w-2xl mt-2">
-                  <div className="flex flex-col border border-gray-300 rounded-2xl bg-white focus-within:ring-2 focus-within:ring-blue-500/40 focus-within:border-blue-500 transition-colors">
+                  <div className="flex flex-col border border-gray-300 rounded-2xl bg-white transition-colors">
                     <input
                       value={query}
                       onChange={e => setQuery(e.target.value)}
@@ -679,7 +679,7 @@ export default function Home() {
                       <button
                         onClick={startResearch}
                         disabled={!query.trim() || phase === 'querying'}
-                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl px-4 py-1.5 text-sm font-semibold transition-colors whitespace-nowrap"
+                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl px-5 py-2 text-sm font-semibold transition-colors whitespace-nowrap focus:outline-none"
                       >
                         {phase === 'querying' ? <><Spinner /> Thinking…</> : <><SendIcon /> Research</>}
                       </button>
@@ -741,7 +741,7 @@ export default function Home() {
                           onChange={e => { const a = [...clarifyAnswers]; a[i] = e.target.value; setClarifyAnswers(a); }}
                           onKeyDown={e => e.key === 'Enter' && !clarifyAnswers.some(a => !a.trim()) && submitClarification()}
                           placeholder="Other… (type a custom answer)"
-                          className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-700 bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400 placeholder:text-gray-400"
+                          className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-700 bg-gray-50 focus:outline-none placeholder:text-gray-400"
                         />
                       </div>
                     );
@@ -1026,7 +1026,7 @@ export default function Home() {
                         onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendChat()}
                         placeholder="Ask a follow-up question…"
                         disabled={chatStreaming}
-                        className="flex-1 border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 disabled:bg-gray-50"
+                        className="flex-1 border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none disabled:bg-gray-50"
                       />
                       <button
                         onClick={sendChat}
