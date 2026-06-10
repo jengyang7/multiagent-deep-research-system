@@ -29,8 +29,15 @@ body {
 
 html {
   /* Scale the whole UI ~10% larger via real layout sizing (rem-based Tailwind
-     utilities), instead of CSS zoom which throws off 100vh/overflow math. */
-  font-size: 110%;
+     utilities), instead of CSS zoom which throws off 100vh/overflow math.
+     Skip the upscale on small screens, where space is already tight. */
+  font-size: 100%;
+}
+
+@media (min-width: 1024px) {
+  html {
+    font-size: 110%;
+  }
 }
 
 body {

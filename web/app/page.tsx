@@ -94,6 +94,15 @@ function Spinner() {
   );
 }
 
+function MenuIcon({ className = 'w-5 h-5' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M3 12h18M3 18h18" />
+    </svg>
+  );
+}
+
 function SendIcon({ className = 'w-4 h-4' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -143,7 +152,7 @@ function ModelPicker({
       </button>
 
       {open && (
-        <div className="absolute top-full right-0 mt-2 w-64 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden z-10">
+        <div className="absolute top-full right-0 mt-2 w-64 max-w-[80vw] rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden z-10">
           {options.map(opt => {
             const isSelected = opt.id === value;
             return (
@@ -218,22 +227,47 @@ function TrashIcon() {
 }
 
 function Sidebar({
-  history, activeId, locked, onNewResearch, onSelect, onDelete,
+  history, activeId, locked, mobileOpen, onNewResearch, onSelect, onDelete, onClose,
 }: {
   history: HistoryEntry[];
   activeId: string | null;
   locked: boolean;
+  mobileOpen: boolean;
   onNewResearch: () => void;
   onSelect: (entry: HistoryEntry) => void;
   onDelete: (id: string, e: React.MouseEvent) => void;
+  onClose: () => void;
 }) {
   return (
-    <aside className="w-60 flex-shrink-0 bg-gray-50 border-r border-gray-200 flex flex-col select-none">
+    <>
+      {/* Mobile backdrop */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 z-30 lg:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-60 flex-shrink-0 bg-gray-50 border-r border-gray-200 flex flex-col select-none
+          transform transition-transform duration-200 ease-in-out
+          ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}
+          lg:static lg:translate-x-0 lg:z-auto`}
+      >
       {/* Brand */}
       <div className="px-5 py-5 border-b border-gray-200 flex items-center justify-between">
         <h1 className="text-[18px] font-extrabold text-gray-900 tracking-tight leading-tight">
           Deep Research Agent
         </h1>
+        <button
+          onClick={onClose}
+          className="lg:hidden flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+          aria-label="Close menu"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       {/* New Research */}
@@ -254,7 +288,7 @@ function Sidebar({
         <p className="px-3 text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-1.5">
           Recents
         </p>
-        <div className="flex-1 overflow-y-auto space-y-0.5 text-sm">
+        <div className="flex-1 overflow-y-auto space-y-0.5 text-[13px]">
           {history.length === 0 ? (
             <p className="px-3 py-2 text-xs text-gray-400">No research yet</p>
           ) : history.map(entry => {
@@ -289,7 +323,8 @@ function Sidebar({
           })}
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
 
@@ -329,6 +364,10 @@ export default function Home() {
 
   const [history,  setHistory]  = useState<HistoryEntry[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  // Mobile-only UI state: off-canvas sidebar drawer + collapsible activity panel
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showActivityMobile, setShowActivityMobile] = useState(false);
 
   // Mirrors engine/models.py LEAD_MODEL_OPTIONS — lets the picker render
   // immediately, before the (possibly cold-starting) backend responds.
@@ -625,18 +664,32 @@ export default function Home() {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="flex h-screen bg-white text-gray-900 overflow-hidden">
+    <div className="flex h-dvh bg-white text-gray-900 overflow-hidden">
 
       <Sidebar
         history={history}
         activeId={activeId}
         locked={phase === 'researching' || phase === 'querying' || phase === 'clarifying'}
-        onNewResearch={reset}
-        onSelect={selectEntry}
+        mobileOpen={sidebarOpen}
+        onNewResearch={() => { reset(); setSidebarOpen(false); }}
+        onSelect={entry => { selectEntry(entry); setSidebarOpen(false); }}
         onDelete={deleteEntry}
+        onClose={() => setSidebarOpen(false)}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
+
+        {/* Mobile top bar */}
+        <div className="lg:hidden flex-shrink-0 h-12 border-b border-gray-200 flex items-center px-4 gap-3">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors -ml-1"
+            aria-label="Open menu"
+          >
+            <MenuIcon />
+          </button>
+          <h1 className="text-sm font-bold text-gray-900 tracking-tight">Deep Research Agent</h1>
+        </div>
 
         {/* ═══════════ IDLE / QUERYING / CLARIFYING / ERROR ═══════════ */}
         {(phase === 'idle' || phase === 'querying' || phase === 'clarifying' || phase === 'error') && (
@@ -644,7 +697,7 @@ export default function Home() {
 
             {phase !== 'clarifying' ? (
               /* ── Home: hero + centered input ── */
-              <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
+              <div className="flex-1 flex flex-col items-center justify-center gap-4 px-4 sm:px-6 text-center">
                 <span className="text-5xl mb-1">🔍</span>
                 <div className="flex flex-col items-center gap-1">
                   <h2 className="text-2xl font-bold text-gray-900">Start Your Research</h2>
@@ -689,12 +742,12 @@ export default function Home() {
               </div>
             ) : (
               /* ── Clarification questions ── */
-              <div className="flex-1 overflow-y-auto flex flex-col justify-center px-6 py-8">
+              <div className="flex-1 overflow-y-auto flex flex-col justify-center px-4 sm:px-6 py-8">
                 <div className="max-w-2xl mx-auto w-full">
                   <div className="border border-gray-200 rounded-2xl shadow-sm bg-white overflow-hidden">
 
                     {/* Card header */}
-                    <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-gray-100">
+                    <div className="flex items-start justify-between px-4 sm:px-6 pt-5 pb-4 border-b border-gray-100">
                       <div>
                         <p className="text-base font-semibold text-gray-900">A few questions to focus the research</p>
                         <p className="text-xs text-gray-400 mt-0.5">Tap an option or type a custom answer</p>
@@ -711,7 +764,7 @@ export default function Home() {
                     </div>
 
                     {/* Card body */}
-                    <div className="px-6 py-5 space-y-7">
+                    <div className="px-4 sm:px-6 py-5 space-y-7">
                   {clarifyQuestions.map((q, i) => {
                     const chips = clarifyOptions[i] ?? [];
                     const isChipSelected = chips.includes(clarifyAnswers[i] ?? '');
@@ -767,17 +820,26 @@ export default function Home() {
           <div className="flex-1 flex flex-col min-h-0">
 
             {/* Header */}
-            <div className="flex-shrink-0 h-12 border-b border-gray-200 flex items-center px-6 gap-3">
-              <span className="text-sm font-semibold text-gray-800">Research Session</span>
-              {phase === 'researching' && (
-                <span className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
-                </span>
-              )}
+            <div className="flex-shrink-0 h-12 border-b border-gray-200 flex items-center justify-between px-4 sm:px-6 gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="text-sm font-semibold text-gray-800 truncate">Research Session</span>
+                {phase === 'researching' && (
+                  <span className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium flex-shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
+                  </span>
+                )}
+              </div>
+              {/* Mobile toggle for the activity panel (steps/sources) */}
+              <button
+                onClick={() => setShowActivityMobile(v => !v)}
+                className="lg:hidden flex-shrink-0 flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg px-2.5 py-1.5 transition-colors"
+              >
+                {showActivityMobile ? 'Hide Activity' : 'Show Activity'}
+              </button>
             </div>
 
             {/* Progress bar — starts at 3%, never goes backward, 100% only when report revealed */}
-            <div className="flex-shrink-0 border-b border-gray-100 px-6 py-2.5 bg-gray-50">
+            <div className="flex-shrink-0 border-b border-gray-100 px-4 sm:px-6 py-2.5 bg-gray-50">
               <div className="flex items-center justify-between text-xs text-gray-500 mb-1.5">
                 <span>Progress</span>
                 <span className="font-medium text-gray-700">
@@ -793,15 +855,15 @@ export default function Home() {
             </div>
 
             {/* Split: center + right panel */}
-            <div className="flex-1 flex min-h-0">
+            <div className="flex-1 flex flex-col lg:flex-row min-h-0">
 
               {/* ── Center ── */}
-              <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">
+              <div className={`flex-1 min-h-0 flex-col min-w-0 overflow-y-auto ${showActivityMobile ? 'hidden lg:flex' : 'flex'}`}>
 
                 {/* Query heading */}
-                <div className="px-8 pt-7 pb-5 border-b border-gray-100">
-                  <div className="flex items-start justify-between gap-4">
-                    <h2 className="text-2xl font-bold text-gray-900 leading-snug">{displayQuery}</h2>
+                <div className="px-4 sm:px-6 lg:px-8 pt-5 sm:pt-7 pb-5 border-b border-gray-100">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <h2 className="text-xl sm:text-2xl font-bold text-gray-900 leading-snug">{displayQuery}</h2>
                     {report && (
                       <button
                         onClick={copyReport}
@@ -838,7 +900,7 @@ export default function Home() {
 
                 {/* Completion banner */}
                 {report && (
-                  <div className="mx-8 mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3.5 flex items-center gap-2">
+                  <div className="mx-4 sm:mx-6 lg:mx-8 mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3.5 flex items-center gap-2">
                     <span className="text-base">✨</span>
                     <span className="text-sm font-semibold text-gray-800">
                       Research completed! Final report is ready to display.
@@ -848,7 +910,7 @@ export default function Home() {
 
                 {/* Usage & cost summary */}
                 {phase === 'done' && usageStats && (
-                  <div className="mx-8 mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-5 py-4">
+                  <div className="mx-4 sm:mx-6 lg:mx-8 mt-4 rounded-2xl border border-gray-200 bg-gray-50 px-5 py-4">
                     <p className="text-[11px] uppercase tracking-wide text-gray-400 font-medium mb-3">
                       Usage Summary
                     </p>
@@ -880,7 +942,7 @@ export default function Home() {
                 )}
 
                 {/* Inline step indicators */}
-                <div className="px-8 pt-5 pb-2 space-y-3">
+                <div className="px-4 sm:px-6 lg:px-8 pt-5 pb-2 space-y-3">
                   {/* Planning */}
                   {phase === 'researching' && subtasks.length === 0 && !supervisorThinking && (
                     <div className="flex items-center gap-2 text-sm text-gray-500">
@@ -931,7 +993,7 @@ export default function Home() {
 
                 {/* Subtask cards — hidden once the final report is ready */}
                 {subtasks.length > 0 && !(showReport && report) && (
-                  <div className="px-8 pt-3 pb-4 space-y-2">
+                  <div className="px-4 sm:px-6 lg:px-8 pt-3 pb-4 space-y-2">
                     <p className="text-[11px] uppercase tracking-wide text-gray-400 font-medium mb-3">
                       Research Plan
                     </p>
@@ -961,7 +1023,7 @@ export default function Home() {
 
                 {/* Report */}
                 {showReport && report && (
-                  <div className="px-8 pt-5 pb-8">
+                  <div className="px-4 sm:px-6 lg:px-8 pt-5 pb-8">
                     <div className="border border-gray-200 rounded-2xl overflow-hidden">
                       <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
                         <span className="text-base">📄</span>
@@ -970,7 +1032,7 @@ export default function Home() {
                           Complete
                         </span>
                       </div>
-                      <div className="p-6 text-sm text-gray-800 leading-relaxed
+                      <div className="p-4 sm:p-6 text-sm text-gray-800 leading-relaxed
                         [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:text-gray-900 [&_h1]:mb-4 [&_h1]:mt-6
                         [&_h2]:text-xl [&_h2]:font-bold [&_h2]:text-gray-900 [&_h2]:mb-3 [&_h2]:mt-8
                         [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-gray-800 [&_h3]:mb-2 [&_h3]:mt-5
@@ -993,7 +1055,7 @@ export default function Home() {
 
                 {/* Follow-up chat */}
                 {phase === 'done' && runId && (
-                  <div className="px-8 pb-8 border-t border-gray-100 space-y-3 mt-auto pt-6">
+                  <div className="px-4 sm:px-6 lg:px-8 pb-8 border-t border-gray-100 space-y-3 mt-auto pt-6">
                     <p className="text-[11px] uppercase tracking-wide text-gray-400 font-medium">
                       Follow-up Chat
                     </p>
@@ -1001,7 +1063,7 @@ export default function Home() {
                       <div className="space-y-2 max-h-60 overflow-y-auto">
                         {chatMessages.map((m, i) => (
                           <div key={i} className={`text-sm rounded-xl px-4 py-2.5 ${
-                            m.role === 'user' ? 'bg-blue-600 text-white ml-12' : 'bg-gray-100 text-gray-800 mr-12'
+                            m.role === 'user' ? 'bg-blue-600 text-white ml-6 sm:ml-12' : 'bg-gray-100 text-gray-800 mr-6 sm:mr-12'
                           }`}>
                             {m.role === 'assistant' ? (
                               m.content ? (
@@ -1041,7 +1103,7 @@ export default function Home() {
               </div>
 
               {/* ── Right panel ── */}
-              <div className="w-[300px] flex-shrink-0 border-l border-gray-200 bg-gray-50 flex flex-col">
+              <div className={`min-h-0 w-full lg:w-[300px] flex-1 lg:flex-none border-t lg:border-t-0 lg:border-l border-gray-200 bg-gray-50 flex-col ${showActivityMobile ? 'flex' : 'hidden lg:flex'}`}>
                 <div className="flex border-b border-gray-200 text-xs font-semibold">
                   {(['steps', 'sources'] as const).map(tab => (
                     <button
