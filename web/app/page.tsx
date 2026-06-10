@@ -330,8 +330,13 @@ export default function Home() {
   const [history,  setHistory]  = useState<HistoryEntry[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
-  const [selectedModel, setSelectedModel] = useState('');
+  // Mirrors engine/models.py LEAD_MODEL_OPTIONS — lets the picker render
+  // immediately, before the (possibly cold-starting) backend responds.
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([
+    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Faster and cheaper' },
+    { id: 'gpt-5.4', label: 'GPT-5.4', description: 'Best for complex topics' },
+  ]);
+  const [selectedModel, setSelectedModel] = useState('gpt-5.4-mini');
 
   const logEndRef  = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -364,15 +369,16 @@ export default function Home() {
     setResearchEndTime(restoredPhase === 'done' && lastLog ? (lastLog.serverTs ?? lastLog.createdAt) : null);
   }
 
-  // Fetch selectable lead models for the New Research page
+  // Fetch selectable lead models for the New Research page — overrides the
+  // hardcoded fallback above once the (possibly cold-starting) backend responds.
   useEffect(() => {
     fetch(`${API}/models`)
       .then(res => res.json())
       .then((data: { default: string; options: ModelOption[] }) => {
-        setModelOptions(data.options ?? []);
-        setSelectedModel(data.default ?? '');
+        if (data.options?.length) setModelOptions(data.options);
+        if (data.default) setSelectedModel(data.default);
       })
-      .catch(() => { /* model picker is optional — backend falls back to its default */ });
+      .catch(() => { /* keep the hardcoded fallback */ });
   }, []);
 
   // Restore history + active session from localStorage on mount
