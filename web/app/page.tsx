@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import EvalDashboard from './components/EvalDashboard';
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
@@ -42,6 +43,7 @@ interface HistoryEntry {
 
 const HISTORY_KEY = 'dra_history_v1';
 const ACTIVE_ID_KEY = 'dra_active_id_v1';
+const CLIENT_ID_KEY = 'dra_client_id_v1';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -227,13 +229,15 @@ function TrashIcon() {
 }
 
 function Sidebar({
-  history, activeId, locked, mobileOpen, onNewResearch, onSelect, onDelete, onClose,
+  history, activeId, locked, mobileOpen, evalActive, onNewResearch, onShowEvalDashboard, onSelect, onDelete, onClose,
 }: {
   history: HistoryEntry[];
   activeId: string | null;
   locked: boolean;
   mobileOpen: boolean;
+  evalActive: boolean;
   onNewResearch: () => void;
+  onShowEvalDashboard: () => void;
   onSelect: (entry: HistoryEntry) => void;
   onDelete: (id: string, e: React.MouseEvent) => void;
   onClose: () => void;
@@ -271,7 +275,7 @@ function Sidebar({
       </div>
 
       {/* New Research */}
-      <div className="px-3 pt-4">
+      <div className="px-3 pt-4 space-y-1.5">
         <button
           onClick={onNewResearch}
           className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-900 font-semibold shadow-sm hover:border-gray-300 transition-colors text-sm"
@@ -280,6 +284,21 @@ function Sidebar({
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
           New Research
+        </button>
+
+        {/* Eval Dashboard */}
+        <button
+          onClick={onShowEvalDashboard}
+          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border font-semibold transition-colors text-sm ${
+            evalActive
+              ? 'bg-white border-gray-200 text-gray-900 shadow-sm'
+              : 'bg-transparent border-transparent text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+          }`}
+        >
+          <svg className="w-[18px] h-[18px] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M8 17V11M13 17V7M18 17v-4" />
+          </svg>
+          Eval Dashboard
         </button>
       </div>
 
@@ -365,6 +384,9 @@ export default function Home() {
   const [history,  setHistory]  = useState<HistoryEntry[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
+  // Top-level view: research flow (default) vs the persisted eval dashboard
+  const [view, setView] = useState<'research' | 'eval'>('research');
+
   // Mobile-only UI state: off-canvas sidebar drawer + collapsible activity panel
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showActivityMobile, setShowActivityMobile] = useState(false);
@@ -376,6 +398,10 @@ export default function Home() {
     { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Faster and cheaper' },
   ]);
   const [selectedModel, setSelectedModel] = useState('gpt-5.4');
+
+  // Anonymous per-visitor id (no login) — scopes /runs and /eval/reports so
+  // visitors only see their own data. Generated once and persisted locally.
+  const [clientId, setClientId] = useState('');
 
   const logEndRef  = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -418,6 +444,20 @@ export default function Home() {
         if (data.default) setSelectedModel(data.default);
       })
       .catch(() => { /* keep the hardcoded fallback */ });
+  }, []);
+
+  // Read or generate the anonymous client id on mount
+  useEffect(() => {
+    try {
+      let id = localStorage.getItem(CLIENT_ID_KEY);
+      if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem(CLIENT_ID_KEY, id);
+      }
+      setClientId(id);
+    } catch {
+      setClientId(crypto.randomUUID());
+    }
   }, []);
 
   // Restore history + active session from localStorage on mount
@@ -577,7 +617,7 @@ export default function Home() {
 
     try {
       const res = await fetch(`${API}/research`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Client-Id': clientId },
         body: JSON.stringify({ query: query.trim(), model: selectedModel || undefined }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -633,22 +673,31 @@ export default function Home() {
     setUsageStats(null);
     setClarifyQuestions([]); setClarifyOptions([]); setClarifyAnswers([]);
     setActiveId(null);
+    setView('research');
   }
 
   // Switch the main view to a past research session from the sidebar
   function selectEntry(entry: HistoryEntry) {
+    setView('research');
     if (entry.id === activeId) return;
     if (phase === 'researching' || phase === 'querying' || phase === 'clarifying') return;
     restoreEntry(entry);
     setActiveId(entry.id);
   }
 
-  // Remove a research session from history (and reset the view if it was active)
+  // Remove a research session from history (and reset the view if it was active).
+  // Also deletes the run + its eval reports server-side, so it disappears from
+  // the eval dashboard's "Completed Research Runs" table too.
   function deleteEntry(id: string, e: React.MouseEvent) {
     e.stopPropagation();
     if (!window.confirm('Delete this research from history?')) return;
+    const entry = history.find(h => h.id === id);
     setHistory(prev => prev.filter(h => h.id !== id));
     if (id === activeId) reset();
+    if (entry?.runId) {
+      fetch(`${API}/runs/${entry.runId}`, { method: 'DELETE', headers: { 'X-Client-Id': clientId } })
+        .catch(() => { /* best-effort: local history is already updated */ });
+    }
   }
 
   function copyReport() {
@@ -671,7 +720,9 @@ export default function Home() {
         activeId={activeId}
         locked={phase === 'researching' || phase === 'querying' || phase === 'clarifying'}
         mobileOpen={sidebarOpen}
+        evalActive={view === 'eval'}
         onNewResearch={() => { reset(); setSidebarOpen(false); }}
+        onShowEvalDashboard={() => { setView('eval'); setSidebarOpen(false); }}
         onSelect={entry => { selectEntry(entry); setSidebarOpen(false); }}
         onDelete={deleteEntry}
         onClose={() => setSidebarOpen(false)}
@@ -691,8 +742,11 @@ export default function Home() {
           <h1 className="text-sm font-bold text-gray-900 tracking-tight">Deep Research Agent</h1>
         </div>
 
+        {/* ═══════════ EVAL DASHBOARD ═══════════ */}
+        {view === 'eval' && <EvalDashboard apiBase={API} clientId={clientId} />}
+
         {/* ═══════════ IDLE / QUERYING / CLARIFYING / ERROR ═══════════ */}
-        {(phase === 'idle' || phase === 'querying' || phase === 'clarifying' || phase === 'error') && (
+        {view === 'research' && (phase === 'idle' || phase === 'querying' || phase === 'clarifying' || phase === 'error') && (
           <div className="flex-1 flex flex-col">
 
             {phase !== 'clarifying' ? (
@@ -816,7 +870,7 @@ export default function Home() {
         )}
 
         {/* ═══════════ RESEARCHING / DONE ═══════════ */}
-        {(phase === 'researching' || phase === 'done') && (
+        {view === 'research' && (phase === 'researching' || phase === 'done') && (
           <div className="flex-1 flex flex-col min-h-0">
 
             {/* Header */}

@@ -49,8 +49,11 @@ def subagent(state: SubagentInput) -> dict[str, object]:
         if not url:
             continue
 
-        # Prefer the fetched body; fall back to Tavily's snippet if fetch fails
-        content: str = fetch(url) or result.get("content", "")
+        # Only extract from sources we can fetch ourselves: a finding cited to a URL
+        # whose page we can't retrieve can never pass the grounding eval (which
+        # independently re-fetches citation_url), so skip rather than fall back to
+        # Tavily's cached snippet.
+        content: str = fetch(url)
         if not content:
             continue
 

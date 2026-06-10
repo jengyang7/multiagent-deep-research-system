@@ -16,6 +16,7 @@ def test_graph_has_all_phase2_nodes() -> None:
     assert "clarify_wait" in nodes
     assert "compact" in nodes
     assert "synthesize" in nodes
+    assert "verify_citations" in nodes
     assert "plan" in nodes
     assert "subagent" in nodes
 
@@ -95,8 +96,8 @@ def test_compact_node_calls_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     }
     result = compact(state)
     assert result["summary"] == "mocked summary"
-    # Raw findings trimmed after compaction
-    assert result["findings"] == []
+    # Raw findings are left in state for verify_citations — compact doesn't return them
+    assert "findings" not in result
 
 
 def test_synthesize_uses_summary_over_raw_findings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,3 +142,85 @@ def test_synthesize_uses_summary_over_raw_findings(monkeypatch: pytest.MonkeyPat
     result = synthesize(state)
     assert result["report"] == "report"
     assert captured.get("findings_text") == "pre-compacted summary text"
+
+
+async def test_verify_citations_strips_unfaithful_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import engine.nodes.verify_citations as verify_mod
+    from eval.schema import FaithfulnessVerdict
+
+    async def fake_checks(
+        report: str, findings: list[object], lead_model: str
+    ) -> tuple[list[FaithfulnessVerdict], list[object], list[object]]:
+        verdicts = [
+            FaithfulnessVerdict(
+                citation_index=1,
+                report_sentence="Faithful claim.",
+                matched_finding_claims=["A claim"],
+                faithful=True,
+                confidence=1.0,
+                reasoning="supported",
+            ),
+            FaithfulnessVerdict(
+                citation_index=2,
+                report_sentence="Unsupported synthesis.",
+                matched_finding_claims=[],
+                faithful=False,
+                confidence=1.0,
+                reasoning="not supported",
+            ),
+        ]
+        return verdicts, [], []
+
+    monkeypatch.setattr(verify_mod, "run_faithfulness_checks", fake_checks)
+
+    state: ResearchState = {
+        "run_id": str(uuid.uuid4()),
+        "query": "test query",
+        "clarification_questions": [],
+        "clarifications": [],
+        "subtasks": [],
+        "findings": [
+            {
+                "subtask": "q1",
+                "claim": "A claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://example.com",
+            }
+        ],
+        "summary": "summary",
+        "report": (
+            "Faithful claim [1]. Unsupported synthesis [2].\n\n"
+            "## References\n\n[1] [A](https://a.com)\n[2] [B](https://b.com)\n"
+        ),
+        "messages": [],
+    }
+    result = await verify_mod.verify_citations(state)
+    report = str(result["report"])
+    assert "Faithful claim [1]." in report
+    assert "Unsupported synthesis." in report
+    assert "Unsupported synthesis [2]" not in report
+    assert result["findings"] == []
+    # References section is left untouched
+    assert "[2] [B](https://b.com)" in report
+
+
+async def test_verify_citations_skips_when_no_findings_or_report() -> None:
+    from engine.nodes.verify_citations import verify_citations
+
+    state: ResearchState = {
+        "run_id": str(uuid.uuid4()),
+        "query": "test query",
+        "clarification_questions": [],
+        "clarifications": [],
+        "subtasks": [],
+        "findings": [],
+        "summary": "",
+        "report": "",
+        "messages": [],
+    }
+    result = verify_citations(state)
+    if hasattr(result, "__await__"):
+        result = await result  # type: ignore[assignment]
+    assert result == {"findings": []}

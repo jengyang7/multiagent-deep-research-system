@@ -21,12 +21,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sse_starlette.sse import EventSourceResponse
 
-from db.models import ResearchRun
+from db.models import EvalReportRecord, ResearchRun
 from engine.memory.checkpointer import get_checkpointer
 from engine.models import LEAD_MODEL, LEAD_MODEL_OPTIONS, SUBAGENT_MODEL, estimate_cost_usd
 from engine.nodes.chat import answer_followup
 from engine.orchestrator import build_graph
 from engine.state import TokenUsage
+from eval.harness import evaluate_run
 
 load_dotenv()
 
@@ -128,6 +129,31 @@ async def _update_run(run_id: str, status: str, **kwargs: object) -> None:
             await session.commit()
 
 
+def _client_id(request: Request) -> str | None:
+    """Anonymous browser-generated id (X-Client-Id header) scoping per-visitor listings."""
+    return request.headers.get("x-client-id")
+
+
+def _eval_record_summary(record: EvalReportRecord) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "run_id": record.run_id,
+        "query": record.query,
+        "generated_at": record.generated_at.isoformat() if record.generated_at else None,
+        "passed": record.passed,
+        "total_findings": record.total_findings,
+        "ungrounded_count": record.ungrounded_count,
+        "total_citations": record.total_citations,
+        "unfaithful_count": record.unfaithful_count,
+        "uncited_count": record.uncited_count,
+        "failure_reasons": record.failure_reasons or [],
+        "eval_model": record.eval_model,
+        "eval_cost_usd": record.eval_cost_usd,
+        "recall_score": record.recall_score,
+        "relevance_score": record.relevance_score,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Core SSE stream generator (shared by /research and /runs/{id}/resume)
 # ---------------------------------------------------------------------------
@@ -189,7 +215,7 @@ async def _stream_graph(
                 elif node_name == "compact":
                     yield _evt({"type": "synthesizing"})
 
-                elif node_name == "synthesize":
+                elif node_name == "verify_citations":
                     report: str = node_output.get("report", "")  # type: ignore[union-attr]
                     yield _evt({"type": "report", "content": report, "run_id": run_id})
 
@@ -252,7 +278,7 @@ async def list_models() -> dict[str, object]:
 
 
 @app.post("/research")
-async def start_research(body: ResearchRequest) -> EventSourceResponse:
+async def start_research(body: ResearchRequest, request: Request) -> EventSourceResponse:
     assert _session_factory is not None
 
     if body.model is not None and body.model not in LEAD_MODEL_OPTIONS:
@@ -261,7 +287,9 @@ async def start_research(body: ResearchRequest) -> EventSourceResponse:
 
     run_id = str(uuid.uuid4())
     async with _session_factory() as session:
-        session.add(ResearchRun(id=run_id, query=body.query, status="pending"))
+        session.add(ResearchRun(
+            id=run_id, query=body.query, status="pending", client_id=_client_id(request)
+        ))
         await session.commit()
 
     initial_state: dict[str, object] = {
@@ -329,6 +357,176 @@ async def get_run(run_id: str) -> dict[str, object]:
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }
+
+
+@app.get("/runs")
+async def list_runs(
+    request: Request, status: str | None = None, limit: int = 50
+) -> list[dict[str, object]]:
+    """List research runs, most recently started first. Powers the eval dashboard's run picker."""
+    assert _session_factory is not None
+
+    stmt = (
+        select(ResearchRun)
+        .where(ResearchRun.client_id == _client_id(request))
+        .order_by(ResearchRun.started_at.desc())
+        .limit(limit)
+    )
+    if status is not None:
+        stmt = stmt.where(ResearchRun.status == status)
+
+    async with _session_factory() as session:
+        result = await session.execute(stmt)
+        runs = result.scalars().all()
+
+    return [
+        {
+            "id": r.id,
+            "query": r.query,
+            "status": r.status,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "stats": r.stats,
+        }
+        for r in runs
+    ]
+
+
+@app.delete("/runs/{run_id}")
+async def delete_run(run_id: str, request: Request) -> dict[str, object]:
+    """Delete a research run, its eval reports (cascade), and checkpoint state.
+
+    Scoped to the calling visitor (X-Client-Id header) — 404 if the run
+    belongs to someone else or doesn't exist. Mirrors the sidebar's "delete
+    from history" action so the run also disappears from the eval dashboard.
+    """
+    assert _session_factory is not None
+    assert _checkpointer is not None
+
+    async with _session_factory() as session:
+        result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if run is None or run.client_id != _client_id(request):
+            raise HTTPException(404, "Run not found")
+        await session.delete(run)
+        await session.commit()
+
+    await _checkpointer.adelete_thread(run_id)
+
+    return {"deleted": run_id}
+
+
+@app.post("/runs/{run_id}/eval")
+async def run_eval(
+    run_id: str, request: Request, strict: bool = False, model: str | None = None
+) -> dict[str, object]:
+    """Run the eval harness (eval/harness.py) against a completed run and persist the result."""
+    assert _session_factory is not None
+
+    if model is not None and model not in LEAD_MODEL_OPTIONS:
+        raise HTTPException(400, f"Unknown model: {model}")
+    eval_model = model or "gpt-5.4-mini"
+
+    async with _session_factory() as session:
+        result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if not run or run.client_id != _client_id(request):
+            raise HTTPException(404, "Run not found")
+
+    try:
+        eval_report = await evaluate_run(run_id, lead_model=eval_model, strict=strict)
+    except ValueError as exc:
+        msg = str(exc)
+        raise HTTPException(404 if "not found" in msg else 400, msg) from exc
+
+    record = EvalReportRecord(
+        run_id=run_id,
+        client_id=run.client_id,
+        query=eval_report.query,
+        passed=eval_report.passed,
+        total_findings=eval_report.total_findings,
+        ungrounded_count=eval_report.ungrounded_count,
+        total_citations=len(eval_report.faithfulness_results),
+        unfaithful_count=eval_report.unfaithful_count,
+        uncited_count=len(eval_report.uncited_sentences),
+        failure_reasons=eval_report.failure_reasons,
+        eval_model=eval_report.eval_model,
+        eval_input_tokens=eval_report.eval_input_tokens,
+        eval_output_tokens=eval_report.eval_output_tokens,
+        eval_cost_usd=eval_report.eval_cost_usd,
+        recall_score=eval_report.completeness.recall_score,
+        relevance_score=eval_report.relevance.score,
+        report=eval_report.model_dump(mode="json"),
+    )
+    async with _session_factory() as session:
+        session.add(record)
+        await session.commit()
+        await session.refresh(record)
+
+    return {**_eval_record_summary(record), "report": record.report}
+
+
+@app.get("/eval/reports")
+async def list_eval_reports(
+    request: Request, run_id: str | None = None, limit: int = 100
+) -> list[dict[str, object]]:
+    """List persisted eval report summaries (no full report body), most recent first."""
+    assert _session_factory is not None
+
+    stmt = (
+        select(EvalReportRecord)
+        .where(EvalReportRecord.client_id == _client_id(request))
+        .order_by(EvalReportRecord.generated_at.desc())
+        .limit(limit)
+    )
+    if run_id is not None:
+        stmt = stmt.where(EvalReportRecord.run_id == run_id)
+
+    async with _session_factory() as session:
+        result = await session.execute(stmt)
+        records = result.scalars().all()
+
+    return [_eval_record_summary(r) for r in records]
+
+
+@app.get("/eval/reports/{report_id}")
+async def get_eval_report(report_id: str, request: Request) -> dict[str, object]:
+    """Full persisted eval report, including grounding/faithfulness detail, for drill-down."""
+    assert _session_factory is not None
+
+    async with _session_factory() as session:
+        result = await session.execute(
+            select(EvalReportRecord).where(EvalReportRecord.id == report_id)
+        )
+        record = result.scalar_one_or_none()
+        if record is None or record.client_id != _client_id(request):
+            raise HTTPException(404, "Eval report not found")
+
+    return {**_eval_record_summary(record), "report": record.report}
+
+
+@app.delete("/eval/reports")
+async def clear_eval_reports(request: Request) -> dict[str, object]:
+    """Delete all eval reports belonging to the calling visitor (X-Client-Id header).
+
+    No-op if the header is missing — this must never wipe shared/unscoped data.
+    """
+    assert _session_factory is not None
+
+    client_id = _client_id(request)
+    if client_id is None:
+        return {"deleted": 0}
+
+    async with _session_factory() as session:
+        result = await session.execute(
+            select(EvalReportRecord).where(EvalReportRecord.client_id == client_id)
+        )
+        records = result.scalars().all()
+        for record in records:
+            await session.delete(record)
+        await session.commit()
+
+    return {"deleted": len(records)}
 
 
 @app.post("/chat")

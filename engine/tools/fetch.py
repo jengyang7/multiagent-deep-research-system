@@ -10,8 +10,8 @@ _MAX_CHARS = 8_000
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DeepResearch/1.0)"}
 
 
-def fetch(url: str) -> str:
-    """Fetch a URL and return cleaned Markdown text, truncated to _MAX_CHARS.
+def fetch(url: str, max_chars: int = _MAX_CHARS) -> str:
+    """Fetch a URL and return cleaned Markdown text, truncated to `max_chars`.
 
     Returns an empty string on network errors so callers can skip gracefully.
     """
@@ -34,4 +34,4 @@ def fetch(url: str) -> str:
 
     # Collapse 3+ consecutive blank lines to 2
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text[:_MAX_CHARS]
+    return text[:max_chars]

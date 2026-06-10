@@ -60,3 +60,33 @@ monkeypatch.setattr("engine.nodes.synthesize.ChatOpenAI", lambda **kw: mock_llm)
 **Files:** `engine/nodes/clarify.py`, `engine/nodes/plan.py`, `engine/orchestrator.py`, `tests/test_phase2_smoke.py`, `engine/models.py`
 **Issue:** Several files had import blocks out of ruff's expected order (third-party before first-party, alphabetical within groups). A `patch` import was added but never used. A `original_prompt` variable was assigned but never read. Two comment lines in `models.py` exceeded the 100-char limit.
 **Fix:** `uv run ruff check --fix` resolved the import ordering, unused import, and unused variable automatically. The long comment lines in `models.py` were shortened manually.
+
+---
+
+## Phase 4 — Eval harness (debugging a "Failed" run via the dashboard)
+
+### 7. Faithfulness judge over-penalized interpretive framing as "unfabricated facts"
+**File:** `eval/faithfulness.py`
+**Issue:** Running the eval dashboard against a real run ("What are the top AI trends shaping 2026?") produced a 26% faithfulness rate (70/94 cited sentences judged unfaithful) despite 96% citation grounding and a 100% completeness score — i.e. the report was well-sourced and on-topic, but the per-sentence judge was failing it anyway. Reviewing the verdicts showed the judge was treating *any* wording difference from the source — interpretive labels ("a major trend", "a key shift"), verbs like "forecasts" or "explicitly frames", or mild generalization of a supported claim — as a fabricated fact, even when every concrete number/name/date in the sentence traced back to a finding.
+
+**Root cause:** `_JUDGE_PROMPT`'s system message framed the rubric as "no added facts" without distinguishing *added facts* (genuinely unsupported numbers, dates, names, causal claims) from *added framing* (the synthesizer's own interpretive language wrapping a supported claim). An LLM judge given only "don't add anything" defaults to flagging any rephrasing.
+
+**Fix:** Rewrote `_JUDGE_PROMPT` with explicit FAITHFUL vs. UNFAITHFUL categories — FAITHFUL explicitly allows rephrasing/summarizing/combining findings, interpretive labels for supported claims, and mild generalization that introduces no new facts/numbers/dates/names; UNFAITHFUL is reserved for new factual specifics, contradictions, or overstated certainty. Re-running the eval on the same report (no change to the report itself) raised the faithfulness rate from 26% (70/94 unfaithful) to 50% (47/94 unfaithful) for $0.2068.
+
+---
+
+### 8. Synthesizer misattaches single-source `[i]` citations to cross-cutting synthesis sentences
+**File:** `engine/nodes/synthesize.py`
+**Issue:** After fixing #7, 47 sentences were still judged unfaithful, and citation `[1]` alone accounted for 22 of them (47%). Reviewing those sentences showed they were almost all the synthesizer's own analytical/conclusion sentences ("Taken together, the top AI trends shaping 2026 are...", "The broader pattern is that model ambition is increasingly bounded by...", "One of the clearest 2026 trends is the emergence of a two-track model landscape..."). These sentences combine multiple themes/findings into the model's own synthesis, but the synthesizer tagged each with a single `[i]` marker — and the judge correctly found the sentence's specific claim wasn't traceable to that one finding.
+
+**Fix:** Added a "Citation discipline" rule to `_PROMPT` in `engine/nodes/synthesize.py`: only attach `[i]` to a sentence whose specific claim is directly stated in finding `i`; for cross-cutting analysis/synthesis sentences, either cite ALL findings the sentence draws from, or leave the sentence uncited (the eval already buckets uncited sentences as informational and doesn't penalize them).
+
+**Result (partial improvement):** Re-ran `synthesize()` with the new prompt against the same findings/summary for this run (not just re-running the eval — citation behavior is baked into the report text itself, so the report had to be regenerated) and re-checked faithfulness on the new report: 78 cited sentences (down from 94 — more were left uncited as intended), 35 unfaithful → **55% faithful** (up from 50%). Citation `[1]` unfaithful count went from 22 → 20, essentially unchanged.
+
+**Remaining gap after the prompt fix:** The remaining `[1]`-cited unfaithful sentences were still broad synthesis sentences ("Across model design, enterprise adoption, infrastructure, and regulation, the same pattern repeats...", "The strongest product-level trend in the findings is..."), and `[1]`'s actual source (an IBM article about 2026 quantum-computing milestones) had no topical relation to most of them. A first attempt at a stronger fix — a single extra LLM self-review pass (new `verify_citations` node, one call asking the model to re-check/correct its own `[i]` markers against the findings) — only moved the needle to 58.46% (27/65 unfaithful). One holistic LLM pass over a 24K-character report wasn't a careful enough per-sentence audit.
+
+**Final fix (structural, supersedes the self-review attempt):** Rewrote `verify_citations` to be a programmatic per-sentence pass: it reuses `eval.faithfulness.run_faithfulness_checks` (the same Issue-#7-fixed judge, run with `CITATION_CHECK_MODEL = "gpt-5.4-mini"`, new constant in `engine/models.py`) against the freshly-synthesized report. For every `[i]`-cited sentence the judge marks unfaithful, a regex-based pass (`_sentence_pattern`/`_strip_citations` in `engine/nodes/verify_citations.py`) strips that sentence's `[i]` marker(s) in place — converting it to an uncited analytical sentence — without touching any other text. Wired into the graph as `synthesize → verify_citations → END` (`engine/orchestrator.py`); `compact` no longer clears `state.findings` (it's needed by `verify_citations`, which clears it afterward); `api/main.py`'s `report` SSE event now fires after `verify_citations`.
+
+**Validated result:** Re-ran `synthesize()` (with the Issue-B-1 prompt fix) + the new `verify_citations()` end-to-end on this run's findings, then re-checked faithfulness on the corrected report: 63 cited sentences (101 left uncited), 7 unfaithful → **88.9% faithful** — within the 85-90% production target.
+
+**Cost tradeoff:** `verify_citations` adds ~112 extra `gpt-5.4-mini` judge calls (~$0.24 at this run's scale — 156 findings / a ~28K-character draft report) to every research run. This is the per-run price of the anti-hallucination guard; smaller reports/finding-sets will cost proportionally less.

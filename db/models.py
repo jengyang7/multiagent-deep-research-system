@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -23,6 +23,8 @@ class ResearchRun(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     query: Mapped[str] = mapped_column(Text, nullable=False)
+    # Anonymous browser-generated id (X-Client-Id header) scoping per-visitor listings.
+    client_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     # pending | awaiting_clarification | running | done | failed
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     # {questions: [...], answers: [...]} populated during human-in-the-loop clarification
@@ -38,6 +40,9 @@ class ResearchRun(Base):
     subtasks: Mapped[list[Subtask]] = relationship(back_populates="run", cascade="all, delete-orphan")
     sources: Mapped[list[Source]] = relationship(back_populates="run", cascade="all, delete-orphan")
     report: Mapped[Optional[Report]] = relationship(back_populates="run", uselist=False, cascade="all, delete-orphan")
+    eval_reports: Mapped[list[EvalReportRecord]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
 
 
 class Subtask(Base):
@@ -93,3 +98,40 @@ class Report(Base):
     structured: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     run: Mapped[ResearchRun] = relationship(back_populates="report")
+
+
+class EvalReportRecord(Base):
+    """Persisted result of running the Phase 4 eval harness (eval/) against a run."""
+
+    __tablename__ = "eval_reports"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String, ForeignKey("research_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    # Denormalized from the parent run so dashboard listing doesn't need a join.
+    client_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    # Denormalized from EvalReport.query so dashboard listing doesn't need a join.
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    passed: Mapped[bool] = mapped_column(nullable=False)
+    total_findings: Mapped[int] = mapped_column(nullable=False)
+    ungrounded_count: Mapped[int] = mapped_column(nullable=False)
+    total_citations: Mapped[int] = mapped_column(nullable=False)
+    unfaithful_count: Mapped[int] = mapped_column(nullable=False)
+    uncited_count: Mapped[int] = mapped_column(nullable=False)
+    failure_reasons: Mapped[Optional[list[str]]] = mapped_column(JSONB, nullable=True)
+    # Eval judge model + cost (eval/harness.py's faithfulness/completeness/relevance LLM calls).
+    eval_model: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    eval_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    eval_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    eval_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # Completeness recall (covered/total subtopics) and relevance score (1-5).
+    recall_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    relevance_score: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Full eval.schema.EvalReport.model_dump() for the drill-down detail view.
+    report: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+
+    run: Mapped[ResearchRun] = relationship(back_populates="eval_reports")

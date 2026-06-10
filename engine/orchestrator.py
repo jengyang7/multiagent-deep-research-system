@@ -10,6 +10,7 @@ from engine.nodes.compact import compact
 from engine.nodes.plan import plan
 from engine.nodes.subagent import subagent
 from engine.nodes.synthesize import synthesize
+from engine.nodes.verify_citations import verify_citations
 from engine.state import ResearchState, SubagentInput
 
 
@@ -23,7 +24,8 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStat
 
     Graph flow:
         START → clarify → clarify_wait (interrupt if ambiguous) → plan
-              → N parallel subagents → compact (layer 2) → synthesize → END
+              → N parallel subagents → compact (layer 2) → synthesize
+              → verify_citations → END
 
     Two-node clarify design: clarify calls the LLM once; clarify_wait holds the
     interrupt() so the LLM is never re-called on resume.
@@ -39,6 +41,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStat
     builder.add_node("subagent", subagent)          # type: ignore[arg-type]
     builder.add_node("compact", compact)            # type: ignore[arg-type]
     builder.add_node("synthesize", synthesize)      # type: ignore[arg-type]
+    builder.add_node("verify_citations", verify_citations)  # type: ignore[arg-type]
 
     # Graph flow
     builder.add_edge(START, "clarify")
@@ -47,7 +50,8 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> CompiledStat
     builder.add_conditional_edges("plan", _fan_out, ["subagent"])  # type: ignore[arg-type]
     builder.add_edge("subagent", "compact")
     builder.add_edge("compact", "synthesize")
-    builder.add_edge("synthesize", END)
+    builder.add_edge("synthesize", "verify_citations")
+    builder.add_edge("verify_citations", END)
 
     return builder.compile(checkpointer=checkpointer)  # type: ignore[return-value]
 

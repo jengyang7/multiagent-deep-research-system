@@ -12,6 +12,10 @@ LEAD_MODEL = "gpt-5.4"
 # gpt-5.4-nano: $0.20/$1.25 per 1M tokens — supports cached input ($0.02)
 SUBAGENT_MODEL = "gpt-5.4-nano"
 
+# Per-sentence citation faithfulness judge: verify_citations node + eval harness
+# gpt-5.4-mini: $0.75/$4.50 per 1M tokens — supports cached input ($0.075)
+CITATION_CHECK_MODEL = "gpt-5.4-mini"
+
 # User-selectable lead models, exposed via the API and the "New Research" UI.
 # Drives clarify/plan/synthesize/chat for a given run.
 LEAD_MODEL_OPTIONS: dict[str, dict[str, str]] = {
