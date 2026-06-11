@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sse_starlette.sse import EventSourceResponse
 
@@ -41,8 +41,11 @@ def _async_engine_from_url(raw: str):
     for unsupported in ("channel_binding", "options"):
         params.pop(unsupported, None)
     clean_url = urlunparse(parsed._replace(query=urlencode(params)))
-    kwargs = {"connect_args": {"ssl": ssl_val}} if ssl_val else {}
-    return create_async_engine(clean_url, **kwargs)
+    kwargs: dict[str, object] = {"connect_args": {"ssl": ssl_val}} if ssl_val else {}
+    # Long-running eval calls can outlive a pooled connection's idle timeout on
+    # managed Postgres (Render/Neon/Supabase). pre_ping detects + replaces dead
+    # connections before use; recycle proactively retires connections older than 5m.
+    return create_async_engine(clean_url, pool_pre_ping=True, pool_recycle=300, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +467,44 @@ async def run_eval(
         await session.refresh(record)
 
     return {**_eval_record_summary(record), "report": record.report}
+
+
+@app.get("/eval/summary")
+async def global_eval_summary() -> dict[str, object]:
+    """Aggregate eval metrics across every visitor's eval reports.
+
+    Unscoped by client_id on purpose — this powers the public "Community Average"
+    card on the eval dashboard. Read-only; never exposes individual reports.
+    """
+    assert _session_factory is not None
+
+    stmt = select(
+        func.count(EvalReportRecord.id),
+        func.count(EvalReportRecord.id).filter(EvalReportRecord.passed.is_(True)),
+        func.coalesce(func.sum(EvalReportRecord.total_findings), 0),
+        func.coalesce(func.sum(EvalReportRecord.ungrounded_count), 0),
+        func.coalesce(func.sum(EvalReportRecord.total_citations), 0),
+        func.coalesce(func.sum(EvalReportRecord.unfaithful_count), 0),
+        func.coalesce(func.sum(EvalReportRecord.recall_score), 0.0),
+        func.coalesce(func.sum(EvalReportRecord.relevance_score), 0),
+    )
+    async with _session_factory() as session:
+        result = await session.execute(stmt)
+        (
+            runs_evaluated, passed_count, total_findings, ungrounded_count,
+            total_citations, unfaithful_count, recall_sum, relevance_sum,
+        ) = result.one()
+
+    grounded = total_findings - ungrounded_count
+    faithful = total_citations - unfaithful_count
+    return {
+        "runs_evaluated": runs_evaluated,
+        "pass_rate": (passed_count / runs_evaluated * 100) if runs_evaluated else None,
+        "grounding_rate": (grounded / total_findings * 100) if total_findings else None,
+        "faithfulness_rate": (faithful / total_citations * 100) if total_citations else None,
+        "completeness_rate": (recall_sum / runs_evaluated * 100) if runs_evaluated else None,
+        "relevance_score": (relevance_sum / runs_evaluated) if runs_evaluated else None,
+    }
 
 
 @app.get("/eval/reports")

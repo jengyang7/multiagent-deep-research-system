@@ -32,6 +32,15 @@ interface ModelOption {
   description?: string;
 }
 
+interface GlobalSummary {
+  runs_evaluated: number;
+  pass_rate: number | null;
+  grounding_rate: number | null;
+  faithfulness_rate: number | null;
+  completeness_rate: number | null;
+  relevance_score: number | null;
+}
+
 interface EvalReportSummary {
   id: string;
   run_id: string;
@@ -132,7 +141,7 @@ function fmtCost(v?: number): string {
 }
 
 function fmtScore(v: number | null): string {
-  return v === null ? '—' : `${v.toFixed(1)}/5`;
+  return v === null ? '—' : `${v.toFixed(1)}/5.0`;
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +423,7 @@ function DetailPanel({ detail, loading }: { detail: EvalReportDetail | null; loa
 export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; clientId: string }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [reports, setReports] = useState<EvalReportSummary[]>([]);
+  const [globalSummary, setGlobalSummary] = useState<GlobalSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
   const [runningEvalFor, setRunningEvalFor] = useState<string | null>(null);
@@ -444,13 +454,15 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
     setLoading(true);
     setErrorMsg('');
     try {
-      const [runsRes, reportsRes] = await Promise.all([
+      const [runsRes, reportsRes, globalRes] = await Promise.all([
         fetch(`${apiBase}/runs?status=done`, { headers }),
         fetch(`${apiBase}/eval/reports`, { headers }),
+        fetch(`${apiBase}/eval/summary`),
       ]);
-      if (!runsRes.ok || !reportsRes.ok) throw new Error('Failed to load eval data');
+      if (!runsRes.ok || !reportsRes.ok || !globalRes.ok) throw new Error('Failed to load eval data');
       setRuns(await runsRes.json());
       setReports(await reportsRes.json());
+      setGlobalSummary(await globalRes.json());
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -596,35 +608,73 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
         </div>
       ) : (
         <>
-          {/* Summary cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Runs Evaluated</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary?.runsEvaluated ?? 0}</p>
+          {/* Your stats */}
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-2">Your Stats</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Runs Evaluated</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary?.runsEvaluated ?? 0}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Pass Rate</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.passRate) : '—'}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Grounding Rate</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.groundingRate) : '—'}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Faithfulness Rate</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.faithfulnessRate) : '—'}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Completeness</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.completenessRate) : '—'}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Relevance</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtScore(summary.relevanceScore) : '—'}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Eval Cost</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtCost(summary.totalCost) : '—'}</p>
+              </div>
             </div>
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Pass Rate</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.passRate) : '—'}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Grounding Rate</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.groundingRate) : '—'}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Faithfulness Rate</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.faithfulnessRate) : '—'}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Completeness</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtPct(summary.completenessRate) : '—'}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Relevance</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtScore(summary.relevanceScore) : '—'}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
-              <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Eval Cost</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary ? fmtCost(summary.totalCost) : '—'}</p>
+          </div>
+
+          {/* Community average — aggregated across all visitors, read-only */}
+          <div>
+            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-2">
+              Community Average
+              <span className="normal-case text-gray-400 font-normal">
+                {' '}— across all visitors
+                {globalSummary && globalSummary.runs_evaluated > 0
+                  ? ` (${globalSummary.runs_evaluated.toLocaleString()} eval${globalSummary.runs_evaluated !== 1 ? 's' : ''})`
+                  : ''}
+              </span>
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Pass Rate</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{fmtPct(globalSummary?.pass_rate ?? null)}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Grounding Rate</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{fmtPct(globalSummary?.grounding_rate ?? null)}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Faithfulness Rate</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{fmtPct(globalSummary?.faithfulness_rate ?? null)}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Completeness</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{fmtPct(globalSummary?.completeness_rate ?? null)}</p>
+              </div>
+              <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold">Relevance</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{fmtScore(globalSummary?.relevance_score ?? null)}</p>
+              </div>
             </div>
           </div>
 
@@ -636,7 +686,7 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
 
           {/* Runs table */}
           <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-            <p className="text-sm font-semibold text-gray-900 px-4 pt-4 pb-2">Completed Research Runs</p>
+            <p className="text-sm font-semibold text-gray-900 px-4 pt-4 pb-2">Recent Research</p>
             {runs.length === 0 ? (
               <p className="text-sm text-gray-400 px-4 pb-4">No completed research runs yet.</p>
             ) : (

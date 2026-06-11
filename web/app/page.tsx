@@ -229,19 +229,21 @@ function TrashIcon() {
 }
 
 function Sidebar({
-  history, activeId, locked, mobileOpen, evalActive, onNewResearch, onShowEvalDashboard, onSelect, onDelete, onClose,
+  history, activeId, locked, mobileOpen, view, onNewResearch, onShowEvalDashboard, onSelect, onDelete, onClose,
 }: {
   history: HistoryEntry[];
   activeId: string | null;
   locked: boolean;
   mobileOpen: boolean;
-  evalActive: boolean;
+  view: 'research' | 'eval';
   onNewResearch: () => void;
   onShowEvalDashboard: () => void;
   onSelect: (entry: HistoryEntry) => void;
   onDelete: (id: string, e: React.MouseEvent) => void;
   onClose: () => void;
 }) {
+  const evalActive = view === 'eval';
+  const newResearchActive = view === 'research' && activeId === null;
   return (
     <>
       {/* Mobile backdrop */}
@@ -278,9 +280,13 @@ function Sidebar({
       <div className="px-3 pt-4 space-y-1.5">
         <button
           onClick={onNewResearch}
-          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-900 font-semibold shadow-sm hover:border-gray-300 transition-colors text-sm"
+          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border font-semibold transition-colors text-sm ${
+            newResearchActive
+              ? 'bg-white border-gray-200 text-gray-900 shadow-sm'
+              : 'bg-transparent border-transparent text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+          }`}
         >
-          <svg className="w-[18px] h-[18px] text-gray-700 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+          <svg className="w-[18px] h-[18px] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
           New Research
@@ -311,7 +317,7 @@ function Sidebar({
           {history.length === 0 ? (
             <p className="px-3 py-2 text-xs text-gray-400">No research yet</p>
           ) : history.map(entry => {
-            const isActive = entry.id === activeId;
+            const isActive = view === 'research' && entry.id === activeId;
             const isLive = isActive && (entry.phase === 'researching' || entry.phase === 'querying' || entry.phase === 'clarifying');
             return (
               <div
@@ -720,7 +726,7 @@ export default function Home() {
         activeId={activeId}
         locked={phase === 'researching' || phase === 'querying' || phase === 'clarifying'}
         mobileOpen={sidebarOpen}
-        evalActive={view === 'eval'}
+        view={view}
         onNewResearch={() => { reset(); setSidebarOpen(false); }}
         onShowEvalDashboard={() => { setView('eval'); setSidebarOpen(false); }}
         onSelect={entry => { selectEntry(entry); setSidebarOpen(false); }}
@@ -892,21 +898,23 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Progress bar — starts at 3%, never goes backward, 100% only when report revealed */}
-            <div className="flex-shrink-0 border-b border-gray-100 px-4 sm:px-6 py-2.5 bg-gray-50">
-              <div className="flex items-center justify-between text-xs text-gray-500 mb-1.5">
-                <span>Progress</span>
-                <span className="font-medium text-gray-700">
-                  {progressPct <= 3 ? '--' : `${progressPct}%`}
-                </span>
+            {/* Progress bar — starts at 3%, never goes backward, hidden once report revealed */}
+            {progressPct < 100 && (
+              <div className="flex-shrink-0 border-b border-gray-100 px-4 sm:px-6 py-2.5 bg-gray-50">
+                <div className="flex items-center justify-between text-xs text-gray-500 mb-1.5">
+                  <span>Progress</span>
+                  <span className="font-medium text-gray-700">
+                    {progressPct <= 3 ? '--' : `${progressPct}%`}
+                  </span>
+                </div>
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-700 ${progressPct <= 3 ? 'animate-pulse' : ''}`}
+                    style={{ width: `${Math.max(progressPct, 3)}%` }}
+                  />
+                </div>
               </div>
-              <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className={`h-full rounded-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-700 ${progressPct <= 3 ? 'animate-pulse' : ''}`}
-                  style={{ width: `${Math.max(progressPct, 3)}%` }}
-                />
-              </div>
-            </div>
+            )}
 
             {/* Split: center + right panel */}
             <div className="flex-1 flex flex-col lg:flex-row min-h-0">
@@ -1114,22 +1122,28 @@ export default function Home() {
                       Follow-up Chat
                     </p>
                     {chatMessages.length > 0 && (
-                      <div className="space-y-2 max-h-60 overflow-y-auto">
+                      <div className="space-y-2 max-h-[32rem] overflow-y-auto">
                         {chatMessages.map((m, i) => (
-                          <div key={i} className={`text-sm rounded-xl px-4 py-2.5 ${
-                            m.role === 'user' ? 'bg-blue-600 text-white ml-6 sm:ml-12' : 'bg-gray-100 text-gray-800 mr-6 sm:mr-12'
-                          }`}>
-                            {m.role === 'assistant' ? (
-                              m.content ? (
-                                <div className="[&_a]:text-blue-600 [&_a:hover]:underline [&_p]:mb-1 [&_code]:bg-gray-200 [&_code]:px-1 [&_code]:rounded text-xs leading-relaxed">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                                </div>
-                              ) : (
-                                <span className="flex items-center gap-1.5 text-gray-400 text-xs">
-                                  <Spinner /> Thinking…
-                                </span>
-                              )
-                            ) : m.content}
+                          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`text-sm rounded-xl px-4 py-2.5 max-w-[85%] sm:max-w-[75%] ${
+                              m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'
+                            }`}>
+                              {m.role === 'assistant' ? (
+                                m.content ? (
+                                  <div className="[&_a]:text-blue-600 [&_a:hover]:underline [&_p]:mb-2 [&_p:last-child]:mb-0
+                                    [&_ul]:list-disc [&_ul]:pl-4 [&_ul]:mb-2 [&_ul]:space-y-1
+                                    [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:mb-2 [&_ol]:space-y-1
+                                    [&_li]:leading-relaxed [&_strong]:font-semibold [&_strong]:text-gray-900
+                                    [&_code]:bg-gray-200 [&_code]:px-1 [&_code]:rounded text-xs leading-relaxed">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                                  </div>
+                                ) : (
+                                  <span className="flex items-center gap-1.5 text-gray-400 text-xs">
+                                    <Spinner /> Thinking…
+                                  </span>
+                                )
+                              ) : m.content}
+                            </div>
                           </div>
                         ))}
                         <div ref={chatEndRef} />
