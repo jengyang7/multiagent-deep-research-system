@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model
+from engine.nodes.debate import format_transcript
 from engine.state import ResearchState
 from engine.usage import usage_from_message
 
@@ -66,9 +66,19 @@ _PROMPT = ChatPromptTemplate.from_messages([
     ),
     (
         "human",
-        "Research query: {query}\n\nFindings:\n{findings_text}",
+        "Research query: {query}\n\nFindings:\n{findings_text}{debate_section}",
     ),
 ])
+
+# Appended to the human message when debate mode produced a transcript.
+_DEBATE_INSTRUCTIONS = (
+    "\n\nAn adversarial debate between an advocate and a skeptic was held over "
+    "these findings. Use it to calibrate confidence: present claims the advocate "
+    "successfully defended with appropriate strength, and explicitly surface the "
+    "caveats, gaps, and counterpoints the skeptic raised that survived rebuttal. "
+    "Do not quote or mention the debaters — the report must still derive every "
+    "fact and citation from the findings above.\n\nDebate transcript:\n"
+)
 
 
 def _format_findings(findings: list[dict[str, str]]) -> str:
@@ -90,11 +100,20 @@ def synthesize(state: ResearchState) -> dict[str, object]:
     # Prefer the compacted summary (layer 2) — fall back to raw findings if compact was skipped
     summary = state.get("summary", "")
     findings_text = summary if summary else _format_findings(state.get("findings", []))  # type: ignore[arg-type]
+    # Debate mode: feed the transcript in so the report reflects what survived scrutiny
+    debate_turns = state.get("debate_turns", [])
+    debate_section = (
+        _DEBATE_INSTRUCTIONS + format_transcript(debate_turns) if debate_turns else ""
+    )
     model = state.get("lead_model", LEAD_MODEL)
-    llm: ChatOpenAI = ChatOpenAI(model=model, temperature=0)
+    llm = make_chat_model(model, temperature=0)
     chain = _PROMPT | llm
     result: BaseMessage = chain.invoke(  # type: ignore[assignment]
-        {"query": state["query"], "findings_text": findings_text}
+        {
+            "query": state["query"],
+            "findings_text": findings_text,
+            "debate_section": debate_section,
+        }
     )
     usage = usage_from_message(result, "synthesize", model)
     return {"report": str(result.content), "token_usage": [usage] if usage else []}

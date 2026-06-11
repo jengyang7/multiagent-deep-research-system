@@ -18,6 +18,21 @@ class Clarification(TypedDict):
     answer: str
 
 
+class DebateTurn(TypedDict):
+    """One turn of the adversarial debate (debate mode)."""
+    agent: str    # "advocate" | "skeptic"
+    model: str    # which LLM produced this turn (shown in the UI badge)
+    round: int    # 1-based; one round = advocate turn + skeptic turn
+    content: str
+
+
+class DebateVerdict(TypedDict):
+    """The lead model's neutral judgment of the finished debate (debate mode)."""
+    winner: str     # "advocate" | "skeptic" | "draw"
+    reasoning: str  # short justification shown in the UI verdict card
+    model: str      # judge model (the run's lead model)
+
+
 class TokenUsage(TypedDict):
     """Token usage for a single LLM call, tagged by node + model (cost tracking)."""
     node: str
@@ -52,6 +67,22 @@ class ResearchState(TypedDict):
     findings: Annotated[list[SubtaskFinding], operator.add]
     # Populated by the compact node (context compaction, layer 2)
     summary: str
+    # Debate mode: when true, two adversarial agents argue over the compacted
+    # findings before synthesis (advocate vs skeptic, debate_rounds rounds)
+    debate_mode: NotRequired[bool]
+    debate_rounds: NotRequired[int]
+    # Cross-provider debater models — fall back to lead_model when absent
+    advocate_model: NotRequired[str]
+    skeptic_model: NotRequired[str]
+    # operator.add reducer accumulates turns; kept after the run (small) so
+    # GET /runs/{id} can restore the debate panel
+    debate_turns: Annotated[list[DebateTurn], operator.add]
+    # The lead model's neutral verdict on who won the debate, set by the
+    # judge_debate node after the final round
+    debate_verdict: NotRequired[DebateVerdict]
+    # Debate-driven gap research: follow-up questions distilled from the
+    # skeptic's unresolved objections, researched in a second subagent round
+    gap_subtasks: NotRequired[list[str]]
     # Final cited Markdown report written by the synthesize node
     report: str
     # add_messages reducer enables multi-turn follow-up chat (layer 3)

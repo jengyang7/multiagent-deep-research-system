@@ -8,10 +8,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model
 from engine.state import SubtaskFinding
 
 _SYSTEM = (
@@ -20,12 +19,14 @@ _SYSTEM = (
     "Answer only from the provided context. If the context doesn't contain the answer, "
     "say so clearly rather than speculating. Cite sources when relevant.\n\n"
     "Format every reply for a narrow chat bubble:\n"
-    "- Keep it concise — a short lead-in sentence or two, no restating the whole report.\n"
-    "- When listing multiple items, options, or comparisons, use a Markdown bullet or "
-    "numbered list (one short point per line) instead of long run-on paragraphs.\n"
+    "- Default to flowing prose: one or two short paragraphs (2-4 sentences each), "
+    "not a wall of bullet points. Summaries and explanations should read like a "
+    "person talking, with the key facts woven into sentences.\n"
+    "- Only use a Markdown bullet or numbered list when the answer genuinely "
+    "enumerates discrete items (e.g. 'list the sources', 'what are the options') — "
+    "and keep it short, after a one-sentence lead-in.\n"
     "- Use **bold** sparingly to highlight key terms, names, or numbers.\n"
-    "- Break distinct ideas into separate short paragraphs rather than one dense block.\n"
-    "- This applies to all questions, not just summaries — keep answers scannable."
+    "- Keep it concise — no restating the whole report."
 )
 
 
@@ -77,7 +78,8 @@ async def answer_followup(
         HumanMessage(content=question),
     ]
 
-    llm: ChatOpenAI = ChatOpenAI(model=lead_model, temperature=0, streaming=True)
+    llm = make_chat_model(lead_model, temperature=0)
     async for chunk in llm.astream(messages):
-        if chunk.content:
-            yield str(chunk.content)
+        # .text, not str(.content): some providers (Gemini) emit content-block lists
+        if chunk.text:
+            yield chunk.text

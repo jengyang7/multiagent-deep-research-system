@@ -117,10 +117,10 @@ def test_synthesize_uses_summary_over_raw_findings(monkeypatch: pytest.MonkeyPat
     mock_chain = MagicMock()
     mock_chain.invoke = fake_invoke
 
-    # Patch ChatOpenAI so no API key is needed, and intercept the chain
+    # Patch the model factory so no API key is needed, and intercept the chain
     mock_llm = MagicMock()
     mock_llm.__ror__ = MagicMock(return_value=mock_chain)
-    monkeypatch.setattr("engine.nodes.synthesize.ChatOpenAI", lambda **kw: mock_llm)
+    monkeypatch.setattr("engine.nodes.synthesize.make_chat_model", lambda *a, **kw: mock_llm)
 
     # Make _PROMPT | mock_llm return mock_chain
     import engine.nodes.synthesize as syn_mod

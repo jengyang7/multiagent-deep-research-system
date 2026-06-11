@@ -16,11 +16,10 @@ from __future__ import annotations
 from datetime import date
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model, structured_output_kwargs
 from engine.state import Clarification, ResearchState
 from engine.usage import usage_from_message
 
@@ -104,13 +103,14 @@ def clarify(state: ResearchState) -> dict[str, object]:
         return {}
 
     model = state.get("lead_model", LEAD_MODEL)
-    llm: ChatOpenAI = ChatOpenAI(model=model, temperature=0)
+    llm = make_chat_model(model, temperature=0)
     chain = _PROMPT | llm.with_structured_output(
-        ClarifyDecision, method="function_calling", include_raw=True
+        ClarifyDecision, include_raw=True, **structured_output_kwargs(model)
     )
     raw = chain.invoke(
         {"query": state["query"], "current_date": date.today().strftime("%B %d, %Y")}
     )
+    assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
     decision: ClarifyDecision = raw["parsed"]
     usage = usage_from_message(raw["raw"], "clarify", model)
     token_usage = [usage] if usage else []
