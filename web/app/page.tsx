@@ -15,8 +15,10 @@ interface ChatMessage  { role: 'user' | 'assistant'; content: string; }
 interface LogEntry     { id: number; type: LogType; label: string; detail?: string; ts: string; createdAt: number; serverTs?: number; }
 interface ModelOption  { id: string; label: string; description: string; }
 interface DebateTurn   { agent: 'advocate' | 'skeptic'; model: string; round: number; content: string; }
+// One judged category in the debate verdict table
+interface VerdictRow  { category: string; assessment: string; winner: 'proposition' | 'opposition' | 'draw'; }
 // The neutral lead model's judgment of the finished debate
-interface DebateVerdict { winner: 'advocate' | 'skeptic' | 'draw'; reasoning: string; model: string; }
+interface DebateVerdict { rows: VerdictRow[]; winner: 'proposition' | 'opposition' | 'draw'; model: string; }
 
 interface UsageStats {
   leadModel: string;
@@ -132,6 +134,16 @@ function SendIcon({ className = 'w-4 h-4' }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
+    </svg>
+  );
+}
+
+function InfoIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 16v-4M12 8h.01" />
     </svg>
   );
 }
@@ -287,6 +299,11 @@ function SubtaskCards({
                 <span className={`flex-1 leading-relaxed ${
                   s.status === 'done' ? 'text-emerald-800' : 'text-gray-600'
                 } ${allDone ? 'text-xs' : 'text-sm'}`}>
+                  <span className={`font-mono font-semibold mr-1.5 ${
+                    s.status === 'done' ? 'text-emerald-500' : 'text-gray-400'
+                  }`}>
+                    Subagent {i + 1}:
+                  </span>
                   {s.question.charAt(0).toUpperCase() + s.question.slice(1)}
                 </span>
                 {s.status === 'done' && (
@@ -304,9 +321,15 @@ function SubtaskCards({
 }
 
 // ---------------------------------------------------------------------------
-// Debate chat bubble — advocate speaks from the left, skeptic from the right,
-// like two AIs in a group chat. `streaming` renders the in-flight turn with a cursor.
+// Debate chat bubble — proposition speaks from the left, opposition from the
+// right, like two AIs in a group chat. `streaming` renders the in-flight turn
+// with a cursor.
 // ---------------------------------------------------------------------------
+
+// Display label for a verdict-table winner cell ("proposition" | "opposition" | "draw")
+function verdictWinnerLabel(winner: VerdictRow['winner']) {
+  return winner === 'draw' ? 'Draw' : winner === 'proposition' ? 'Proposition' : 'Opposition';
+}
 
 function DebateBubble({
   agent, round, modelLabel, content, streaming = false,
@@ -323,7 +346,7 @@ function DebateBubble({
       <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${
         isSkeptic ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'
       }`}>
-        {isSkeptic ? 'S' : 'A'}
+        {isSkeptic ? 'O' : 'P'}
       </div>
       <div className={`max-w-[88%] sm:max-w-[80%] rounded-2xl border px-4 py-3 ${
         isSkeptic
@@ -332,7 +355,7 @@ function DebateBubble({
       }`}>
         <div className={`flex items-baseline gap-2 mb-1.5 ${isSkeptic ? 'justify-end' : ''}`}>
           <span className={`text-[11px] font-semibold ${isSkeptic ? 'text-amber-700' : 'text-blue-700'}`}>
-            {isSkeptic ? 'Skeptic' : 'Advocate'}
+            {isSkeptic ? 'Opposition' : 'Proposition'}
           </span>
           <span className="text-[11px] text-gray-400">
             Round {round} · {modelLabel}{streaming ? ' · typing…' : ''}
@@ -408,8 +431,14 @@ function Sidebar({
       >
       {/* Brand */}
       <div className="px-5 py-5 border-b border-gray-200 flex items-center justify-between">
-        <h1 className="text-[18px] font-extrabold text-gray-900 tracking-tight leading-tight">
-          Deep Research Agent
+        <h1 className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-tight">
+          MindClash
+          <span className="block text-[12px] font-bold text-gray-400 tracking-normal mt-2">
+            Multi-agent deep research with
+            <br />
+            debate system
+          </span>
+     
         </h1>
         <button
           onClick={onClose}
@@ -479,7 +508,7 @@ function Sidebar({
                     : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
                 } ${locked && !isActive ? 'opacity-50' : ''}`}
               >
-                <HistoryItemIcon />
+                {/* <HistoryItemIcon /> */}
                 <span className="flex-1 truncate">{entry.title || entry.query || 'Untitled research'}</span>
                 {isLive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />}
                 <button
@@ -554,6 +583,8 @@ export default function Home() {
 
   // Debate mode: two cross-provider agents argue over the findings pre-synthesis
   const [debateMode,     setDebateMode]     = useState(false);
+  const [debateInfoOpen, setDebateInfoOpen] = useState(false);
+  const debateInfoRef = useRef<HTMLDivElement>(null);
   const [advocateModel,  setAdvocateModel]  = useState('gpt-5.4');
   const [skepticModel,   setSkepticModel]   = useState('gpt-5.4');
   const [debateTurns,    setDebateTurns]    = useState<DebateTurn[]>([]);
@@ -568,6 +599,9 @@ export default function Home() {
   // Judge phase: the neutral lead weighs both sides after the final round
   const [judgingActive,  setJudgingActive]  = useState(false);
   const [debateVerdict,  setDebateVerdict]  = useState<DebateVerdict | null>(null);
+  // Verdict card is collapsible — expanded while live, auto-collapsed once the
+  // final report is ready so the report takes center stage (still re-openable)
+  const [verdictExpanded, setVerdictExpanded] = useState(true);
 
   // Debate-driven gap research (second finding round, debate mode only)
   const [gapSubtasks,       setGapSubtasks]       = useState<SubtaskState[]>([]);
@@ -611,6 +645,18 @@ export default function Home() {
   // Switching sessions (or pages) lands at the top of the restored session
   useEffect(() => { centerRef.current?.scrollTo({ top: 0 }); }, [activeId, view]);
 
+  // Close the "what is debate mode" popover on outside click
+  useEffect(() => {
+    if (!debateInfoOpen) return;
+    function onClick(e: MouseEvent) {
+      if (debateInfoRef.current && !debateInfoRef.current.contains(e.target as Node)) {
+        setDebateInfoOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [debateInfoOpen]);
+
   // Follow the live debate: keep the newest bubble (or the streaming one) in
   // view while turns arrive. Only during the run — never when a finished
   // debate is re-opened later.
@@ -619,6 +665,12 @@ export default function Home() {
       debateEndRef.current?.scrollIntoView({ block: 'nearest' });
     }
   }, [phase, debatingActive, debateStreaming, debateTurns]);
+
+  // Auto-hide the verdict card once the final report is ready, so the report
+  // takes center stage. Still re-openable via the card's header toggle.
+  useEffect(() => {
+    if (report) setVerdictExpanded(false);
+  }, [report]);
 
   // 1s tick while researching — drives the live elapsed time on the last
   // thinking step so it never sits on a static "Running…"
@@ -787,6 +839,14 @@ export default function Home() {
     return 0;
   })();
 
+  // Reflect the current step + progress in the browser tab title while a run
+  // is in flight, so progress is visible even when this tab isn't focused.
+  useEffect(() => {
+    document.title = phase === 'researching'
+      ? `${progressPct}% · ${milestones[milestoneIdx]} — MindClash`
+      : 'MindClash';
+  }, [phase, progressPct, milestones, milestoneIdx]);
+
   const displayQuery = title || (query ? query.charAt(0).toUpperCase() + query.slice(1) : '');
 
   // -------------------------------------------------------------------------
@@ -861,7 +921,7 @@ export default function Home() {
       };
       setDebateStreaming(null);
       setDebateTurns(prev => [...prev, turn]);
-      const label = turn.agent === 'advocate' ? 'Advocate' : 'Skeptic';
+      const label = turn.agent === 'advocate' ? 'Proposition' : 'Opposition';
       addLog('debate', `Debate — ${label} (round ${turn.round})`, turn.content.slice(0, 160) + (turn.content.length > 160 ? '…' : ''), serverTs);
     } else if (type === 'judging') {
       setDebatingActive(false);
@@ -869,11 +929,13 @@ export default function Home() {
       addLog('debate', 'Judging the Debate', 'A neutral judge (the lead model) is weighing both sides to declare a winner', serverTs);
     } else if (type === 'debate_verdict') {
       const winner = data.winner as DebateVerdict['winner'];
-      const reasoning = data.reasoning as string;
+      const rows = data.rows as VerdictRow[];
       setJudgingActive(false);
-      setDebateVerdict({ winner, reasoning, model: data.model as string });
-      const label = winner === 'draw' ? 'Draw' : `${winner === 'advocate' ? 'Advocate' : 'Skeptic'} wins`;
-      addLog('debate', `Debate Verdict — ${label}`, reasoning.slice(0, 160) + (reasoning.length > 160 ? '…' : ''), serverTs);
+      setVerdictExpanded(true);
+      setDebateVerdict({ winner, rows, model: data.model as string });
+      const label = winner === 'draw' ? 'Draw' : `${verdictWinnerLabel(winner)} wins`;
+      const detail = rows.map(r => `${r.category}: ${r.assessment}`).join(' ');
+      addLog('debate', `Debate Verdict — ${label}`, detail.slice(0, 160) + (detail.length > 160 ? '…' : ''), serverTs);
     } else if (type === 'gap_planning') {
       setDebatingActive(false);
       setJudgingActive(false);
@@ -892,6 +954,12 @@ export default function Home() {
       setJudgingActive(false);
       setGapPlanningActive(false);
       setSynthesizingActive(true);
+      // Synthesis is the last step before the report — every earlier step
+      // (planning, research, debate, judging, gap research) is now complete.
+      setPlanCardsExpanded(false);
+      setDebateExpanded(false);
+      setVerdictExpanded(false);
+      setGapCardsExpanded(false);
       addLog('synthesis', 'Synthesizing Findings', undefined, serverTs);
     } else if (type === 'clarification_needed') {
       const qs = (data.questions as string[]) ?? [];
@@ -1088,7 +1156,7 @@ export default function Home() {
 
     lines.push(`# ${displayQuery}`, '');
     lines.push(`> **Research query:** ${query}`, '');
-    lines.push(`*Generated by Deep Research Agent on ${new Date().toLocaleString()}*`, '');
+    lines.push(`*Generated by MindClash on ${new Date().toLocaleString()}*`, '');
 
     if (usageStats) {
       lines.push('## Run Summary', '');
@@ -1113,15 +1181,18 @@ export default function Home() {
     if (debateTurns.length > 0) {
       lines.push('## Debate', '');
       for (const t of debateTurns) {
-        lines.push(`### Round ${t.round} — ${t.agent === 'advocate' ? 'Advocate' : 'Skeptic'} (${modelLabel(t.model)})`, '');
+        lines.push(`### Round ${t.round} — ${t.agent === 'advocate' ? 'Proposition' : 'Opposition'} (${modelLabel(t.model)})`, '');
         lines.push(t.content, '');
       }
       if (debateVerdict) {
-        const label = debateVerdict.winner === 'draw'
-          ? 'Draw' : `${debateVerdict.winner === 'advocate' ? 'Advocate' : 'Skeptic'} wins`;
+        const label = debateVerdict.winner === 'draw' ? 'Draw' : `${verdictWinnerLabel(debateVerdict.winner)} wins`;
         lines.push(`### Judge's Verdict — ${label}`, '');
         lines.push(`*Judged by ${modelLabel(debateVerdict.model)}*`, '');
-        lines.push(debateVerdict.reasoning, '');
+        lines.push('', '| Category | Assessment | Winner |', '|---|---|---|');
+        for (const row of debateVerdict.rows) {
+          lines.push(`| ${row.category} | ${row.assessment} | ${verdictWinnerLabel(row.winner)} |`);
+        }
+        lines.push('');
       }
     }
 
@@ -1204,7 +1275,7 @@ export default function Home() {
           >
             <MenuIcon />
           </button>
-          <h1 className="text-sm font-bold text-gray-900 tracking-tight">Deep Research Agent</h1>
+          <h1 className="text-sm font-bold text-gray-900 tracking-tight">MindClash</h1>
         </div>
 
         {/* ═══════════ EVAL DASHBOARD ═══════════ */}
@@ -1217,11 +1288,11 @@ export default function Home() {
             {phase !== 'clarifying' ? (
               /* ── Home: hero + centered input ── */
               <div className="flex-1 flex flex-col items-center justify-center gap-4 px-4 sm:px-6 text-center">
-                <span className="text-5xl mb-1">🔍</span>
+                <span className="text-5xl mb-1">📝</span>
                 <div className="flex flex-col items-center gap-1">
                   <h2 className="text-2xl font-bold text-gray-900">Start Your Research</h2>
                   <p className="text-gray-400 text-sm max-w-md">
-                    Ask a question to begin comprehensive AI-powered research
+                    Ask a question to begin comprehensive AI-powered deep research
                   </p>
                 </div>
                 {phase === 'error' && (
@@ -1240,19 +1311,34 @@ export default function Home() {
                       className="w-full bg-transparent px-4 pt-4 pb-2 text-sm focus:outline-none disabled:text-gray-600 disabled:cursor-default min-h-[64px]"
                     />
                     <div className="flex items-center justify-end gap-2 px-3 pb-2.5 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setDebateMode(v => !v)}
-                        disabled={phase === 'querying'}
-                        title="Two agents argue opposing positions over the findings before the report is written"
-                        className={`mr-auto flex items-center gap-1.5 text-xs font-medium rounded-lg px-2.5 py-1.5 border transition-colors disabled:cursor-default disabled:opacity-50 focus:outline-none ${
-                          debateMode
-                            ? 'bg-rose-50 border-rose-200 text-rose-600'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                        ⚖️ Debate {debateMode ? 'on' : 'off'}
-                      </button>
+                      <div ref={debateInfoRef} className="mr-auto flex items-center gap-0.5 relative">
+                        <button
+                          type="button"
+                          onClick={() => setDebateMode(v => !v)}
+                          disabled={phase === 'querying'}
+                          className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-2.5 py-1.5 border transition-colors disabled:cursor-default disabled:opacity-50 focus:outline-none ${
+                            debateMode
+                              ? 'bg-rose-50 border-rose-200 text-rose-600'
+                              : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                          }`}
+                        >
+                          ⚔️   Debate {debateMode ? 'on' : 'off'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDebateInfoOpen(v => !v)}
+                          aria-label="What is debate mode?"
+                          className="flex items-center text-gray-400 hover:text-gray-600 focus:outline-none p-1"
+                        >
+                          <InfoIcon />
+                        </button>
+                        {debateInfoOpen && (
+                          <div className="absolute bottom-full left-0 mb-2 w-64 bg-gray-900 text-white text-xs text-left leading-relaxed rounded-xl shadow-lg px-3 py-2.5 z-10">
+                            When enabled, two AI models challenge each other’s answers, identify weaknesses and missing information, then do extra research before producing a final response. This takes longer but often results in a more thorough and accurate answer.
+                            <div className="absolute top-full left-4 w-2 h-2 bg-gray-900 rotate-45 -mt-1" />
+                          </div>
+                        )}
+                      </div>
                       {modelOptions.length > 0 && (
                         <ModelPicker
                           options={modelOptions}
@@ -1276,7 +1362,7 @@ export default function Home() {
                         </span>
                         {/* Label + picker wrap together as one unit */}
                         <span className="flex items-center gap-1 whitespace-nowrap">
-                          <span className="text-[11px] text-gray-400 font-medium">Advocate</span>
+                          <span className="text-[11px] text-gray-400 font-medium">Proposition</span>
                           <ModelPicker
                             options={modelOptions}
                             value={advocateModel}
@@ -1285,7 +1371,7 @@ export default function Home() {
                           />
                         </span>
                         <span className="flex items-center gap-1 whitespace-nowrap">
-                          <span className="text-[11px] text-gray-400 font-medium">Skeptic</span>
+                          <span className="text-[11px] text-gray-400 font-medium">Opposition</span>
                           <ModelPicker
                             options={modelOptions}
                             value={skepticModel}
@@ -1615,7 +1701,7 @@ export default function Home() {
                   {debatingActive && (
                     <div className="flex items-center gap-2 text-sm text-gray-500">
                       <Spinner />
-                      <span>⚖️ Agents are debating the findings — advocate vs skeptic…</span>
+                      <span>⚖️ Agents are debating the findings — proposition vs opposition…</span>
                     </div>
                   )}
 
@@ -1707,31 +1793,69 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Judge's verdict — the neutral lead model's call on who won */}
+                {/* Judge's verdict — the neutral lead model's categorized call on who
+                    won, as a table. Collapsible; auto-collapses once the final
+                    report is ready so the report takes center stage. */}
                 {debateVerdict && (
                   <div className="px-4 sm:px-6 lg:px-8 pt-4">
                     <div className="border border-amber-200 rounded-2xl overflow-hidden">
-                      <div className="bg-amber-50 px-5 py-3 flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => setVerdictExpanded(v => !v)}
+                        className="w-full bg-amber-50 px-5 py-3 flex flex-wrap items-center gap-2 text-left focus:outline-none"
+                      >
                         <span className="text-base">🏆</span>
                         <span className="text-sm font-semibold text-gray-800">Judge&apos;s Verdict</span>
                         <span className={`text-[11px] font-semibold rounded-full px-2.5 py-0.5 border ${
-                          debateVerdict.winner === 'advocate'
+                          debateVerdict.winner === 'proposition'
                             ? 'bg-blue-50 border-blue-200 text-blue-700'
-                            : debateVerdict.winner === 'skeptic'
+                            : debateVerdict.winner === 'opposition'
                               ? 'bg-amber-100 border-amber-300 text-amber-800'
                               : 'bg-gray-100 border-gray-300 text-gray-600'
                         }`}>
-                          {debateVerdict.winner === 'draw'
-                            ? 'Draw'
-                            : `${debateVerdict.winner === 'advocate' ? 'Advocate' : 'Skeptic'} wins`}
+                          {debateVerdict.winner === 'draw' ? 'Draw' : `${verdictWinnerLabel(debateVerdict.winner)} wins`}
                         </span>
-                        <span className="ml-auto text-[11px] text-gray-400">
+                        <span className="ml-auto flex items-center gap-2 text-[11px] text-gray-400">
                           Judged by {modelOptions.find(o => o.id === debateVerdict.model)?.label ?? debateVerdict.model}
+                          <svg
+                            className={`w-4 h-4 text-gray-400 transition-transform ${verdictExpanded ? 'rotate-180' : ''}`}
+                            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                          </svg>
                         </span>
-                      </div>
-                      <div className="px-5 py-4 text-sm text-gray-700 leading-relaxed">
-                        {debateVerdict.reasoning}
-                      </div>
+                      </button>
+                      {verdictExpanded && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm text-left border-collapse">
+                            <thead>
+                              <tr className="border-t border-amber-100 text-[11px] text-gray-400 uppercase tracking-wide">
+                                <th className="px-5 py-2 font-semibold">Category</th>
+                                <th className="px-5 py-2 font-semibold">Judge&apos;s Assessment</th>
+                                <th className="px-5 py-2 font-semibold whitespace-nowrap">Winner</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {debateVerdict.rows.map((row, i) => (
+                                <tr key={i} className="border-t border-amber-100">
+                                  <td className="px-5 py-2.5 font-medium text-gray-800 whitespace-nowrap">{row.category}</td>
+                                  <td className="px-5 py-2.5 text-gray-600">{row.assessment}</td>
+                                  <td className="px-5 py-2.5 whitespace-nowrap">
+                                    <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 border ${
+                                      row.winner === 'proposition'
+                                        ? 'bg-blue-50 border-blue-200 text-blue-700'
+                                        : row.winner === 'opposition'
+                                          ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                          : 'bg-gray-100 border-gray-300 text-gray-600'
+                                    }`}>
+                                      {verdictWinnerLabel(row.winner)}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

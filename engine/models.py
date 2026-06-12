@@ -31,6 +31,11 @@ CITATION_CHECK_MODEL = "gpt-5.4-mini"
 ADVOCATE_MODEL = "claude-sonnet-4-6"
 SKEPTIC_MODEL = "gemini-3.1-pro-preview"
 
+# Eval harness judge default — deliberately a different provider than LEAD_MODEL
+# (OpenAI), for the same self-preference-bias reason as the debate skeptic: a
+# model is a more reliable judge of writing it didn't produce itself.
+EVAL_MODEL = "claude-haiku-4-5"
+
 # User-selectable models, exposed via the API and the UI pickers.
 # "lead" drives clarify/plan/synthesize/chat; advocate/skeptic drive the
 # debate stage. env_key gates availability — a model is only offered when
@@ -145,6 +150,7 @@ def role_default_models() -> dict[str, str]:
         "lead": LEAD_MODEL,
         "advocate": ADVOCATE_MODEL if ADVOCATE_MODEL in available else LEAD_MODEL,
         "skeptic": SKEPTIC_MODEL if SKEPTIC_MODEL in available else LEAD_MODEL,
+        "eval": EVAL_MODEL if EVAL_MODEL in available else LEAD_MODEL,
     }
 
 

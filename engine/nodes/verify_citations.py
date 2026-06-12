@@ -8,6 +8,18 @@ turning a falsely-attributed claim into an uncited analytical/synthesis
 sentence (which the eval harness treats as informational, not penalized)
 instead of leaving a misleading citation in the published report.
 
+Also rebuilds the ## References section to exactly match the [i] markers
+still present in the body afterward — the synthesizer's own References list
+can omit citations it used in the body or list ones it never used (the LLM
+free-hands this list alongside ~100 inline citations). Dropped citations no
+longer get an orphaned reference entry, and any cited [i] missing from the
+LLM's list is filled in from `state.findings`.
+
+Also strips stray non-numeric bracket markers (e.g. "[Synthesis]") that can
+leak from the debate transcript into the synthesized report — these aren't
+valid [i] citations and have no References entry, so they read as broken
+citations to a reader.
+
 Clears state.findings afterward — this is the last node that needs the raw
 findings list.
 """
@@ -20,12 +32,17 @@ from engine.state import ResearchState
 from eval.faithfulness import run_faithfulness_checks
 from eval.report_parsing import (
     extract_citation_indices,
+    parse_references,
     split_body_and_references,
     split_sentences,
 )
 
 _CITATION_MARKER_RE = re.compile(r"\[(\d+)\]")
 _DANGLING_SPACE_RE = re.compile(r"[ \t]+(?=[.,;:!?])|  +")
+# Stray non-numeric bracket markers like [Synthesis] sometimes leak from the
+# debate transcript into the synthesized report — not a markdown link (no
+# trailing `(url)`) and not a valid [i] citation, so strip them too.
+_NON_NUMERIC_MARKER_RE = re.compile(r"\[[A-Za-z][^\]]*\](?!\()")
 
 
 def _sentence_pattern(sentence: str) -> re.Pattern[str]:
@@ -53,6 +70,31 @@ def _strip_citations(body: str, sentence: str, start: int) -> tuple[str, int]:
     return new_body, match.start() + len(cleaned)
 
 
+def _rebuild_references(
+    body: str, references: str, findings: list[dict[str, str]]
+) -> str:
+    """Rebuild '## References' so it exactly matches the [i] markers left in `body`.
+
+    Drops entries for indices no longer cited (orphans) and adds entries for
+    cited indices the synthesizer's own list omitted, sourced from `findings`
+    (1-indexed, matching the [i] numbering used throughout synthesis).
+    """
+    cited = sorted({int(n) for n in _CITATION_MARKER_RE.findall(body)})
+    if not cited:
+        return "\n\n## References\n"
+    parsed = parse_references(references)
+    lines = ["", "## References", ""]
+    for i in cited:
+        if i in parsed:
+            ref = parsed[i]
+            lines.append(f"[{i}] [{ref.title}]({ref.url})")
+        elif 1 <= i <= len(findings):
+            url = findings[i - 1]["citation_url"]
+            lines.append(f"[{i}] [{url}]({url})")
+    lines.append("")
+    return "\n".join(lines)
+
+
 async def verify_citations(state: ResearchState) -> dict[str, object]:
     """Strip [i] citations the faithfulness judge can't verify (verify_citations node)."""
     report = state.get("report", "")
@@ -72,4 +114,8 @@ async def verify_citations(state: ResearchState) -> dict[str, object]:
         if not verdict.faithful:
             body, cursor = _strip_citations(body, sentence, cursor)
 
+    body = _NON_NUMERIC_MARKER_RE.sub("", body)
+    body = _DANGLING_SPACE_RE.sub(lambda m: "" if m.group().strip() == "" else " ", body)
+
+    references = _rebuild_references(body, references, findings)  # type: ignore[arg-type]
     return {"report": body + references, "findings": [], "token_usage": token_usage}

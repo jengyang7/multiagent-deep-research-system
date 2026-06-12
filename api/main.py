@@ -191,7 +191,7 @@ async def _stream_graph(
       debate_token        {type, agent, content}      (debate mode only, per LLM token)
       debate_turn         {type, agent, model, round, content}  (debate mode only)
       judging             {type}                      (debate mode only)
-      debate_verdict      {type, winner, reasoning, model}      (debate mode only)
+      debate_verdict      {type, winner, rows: [{category, assessment, winner}], model}  (debate mode only)
       gap_planning        {type}                      (debate mode only)
       gap_plan            {type, subtasks: [...]}     (debate mode only)
       synthesizing        {type}
@@ -547,7 +547,7 @@ async def run_eval(
 
     if model is not None and model not in available_model_options():
         raise HTTPException(400, f"Unknown or unavailable model: {model}")
-    eval_model = model or "gpt-5.4-mini"
+    eval_model = model or role_default_models()["eval"]
 
     async with _session_factory() as session:
         result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
@@ -626,6 +626,45 @@ async def global_eval_summary() -> dict[str, object]:
     }
 
 
+@app.get("/eval/reports/community")
+async def community_eval_trend(limit: int = 200) -> list[dict[str, object]]:
+    """Time-ordered eval counts across every visitor, for the public "Quality Over
+    Time" trend chart.
+
+    Unscoped by client_id on purpose (same rationale as /eval/summary) — exposes
+    only the aggregate counts needed to compute grounding/faithfulness rate per
+    report, never query text or identifiers, so individual reports can't be
+    drilled into from this endpoint.
+    """
+    assert _session_factory is not None
+
+    stmt = (
+        select(
+            EvalReportRecord.generated_at,
+            EvalReportRecord.total_findings,
+            EvalReportRecord.ungrounded_count,
+            EvalReportRecord.total_citations,
+            EvalReportRecord.unfaithful_count,
+        )
+        .order_by(EvalReportRecord.generated_at.desc())
+        .limit(limit)
+    )
+    async with _session_factory() as session:
+        result = await session.execute(stmt)
+        rows = result.all()
+
+    return [
+        {
+            "generated_at": generated_at.isoformat() if generated_at else None,
+            "total_findings": total_findings,
+            "ungrounded_count": ungrounded_count,
+            "total_citations": total_citations,
+            "unfaithful_count": unfaithful_count,
+        }
+        for generated_at, total_findings, ungrounded_count, total_citations, unfaithful_count in reversed(rows)
+    ]
+
+
 @app.get("/eval/reports")
 async def list_eval_reports(
     request: Request, run_id: str | None = None, limit: int = 100
@@ -681,6 +720,30 @@ async def clear_eval_reports(request: Request) -> dict[str, object]:
         result = await session.execute(
             select(EvalReportRecord).where(EvalReportRecord.client_id == client_id)
         )
+        records = result.scalars().all()
+        for record in records:
+            await session.delete(record)
+        await session.commit()
+
+    return {"deleted": len(records)}
+
+
+@app.delete("/eval/reports/community")
+async def clear_community_eval_reports(request: Request) -> dict[str, object]:
+    """Wipe every visitor's eval reports, resetting the public "Community Average".
+
+    Gated by the ADMIN_SECRET env var via the X-Admin-Secret header. Returns 404
+    if ADMIN_SECRET is unset (endpoint disabled) or the header doesn't match —
+    the same response either way so the endpoint's existence isn't revealed.
+    """
+    assert _session_factory is not None
+
+    admin_secret = os.getenv("ADMIN_SECRET")
+    if not admin_secret or request.headers.get("x-admin-secret") != admin_secret:
+        raise HTTPException(404, "Not found")
+
+    async with _session_factory() as session:
+        result = await session.execute(select(EvalReportRecord))
         records = result.scalars().all()
         for record in records:
             await session.delete(record)

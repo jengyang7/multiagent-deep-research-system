@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Deep Research",
-  description: "Multi-agent research system with memory",
+  title: "MindClash",
+  description: "Multi-agent deep research with a built-in debate system",
 };
 
 export default function RootLayout({

@@ -202,8 +202,126 @@ async def test_verify_citations_strips_unfaithful_citations(
     assert "Unsupported synthesis." in report
     assert "Unsupported synthesis [2]" not in report
     assert result["findings"] == []
-    # References section is left untouched
-    assert "[2] [B](https://b.com)" in report
+    # References section is rebuilt to match what's still cited: [1] kept,
+    # [2] dropped as an orphan since its citation was stripped from the body
+    assert "[1] [A](https://a.com)" in report
+    assert "[2] [B](https://b.com)" not in report
+
+
+async def test_verify_citations_fills_in_missing_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A citation the synthesizer used in the body but omitted from its own
+    References list is filled in from state.findings."""
+    import engine.nodes.verify_citations as verify_mod
+    from eval.schema import FaithfulnessVerdict
+
+    async def fake_checks(
+        report: str, findings: list[object], lead_model: str
+    ) -> tuple[list[FaithfulnessVerdict], list[object], list[object]]:
+        verdicts = [
+            FaithfulnessVerdict(
+                citation_index=2,
+                report_sentence="Second claim.",
+                matched_finding_claims=["B claim"],
+                faithful=True,
+                confidence=1.0,
+                reasoning="supported",
+            ),
+        ]
+        return verdicts, [], []
+
+    monkeypatch.setattr(verify_mod, "run_faithfulness_checks", fake_checks)
+
+    state: ResearchState = {
+        "run_id": str(uuid.uuid4()),
+        "query": "test query",
+        "clarification_questions": [],
+        "clarifications": [],
+        "subtasks": [],
+        "findings": [
+            {
+                "subtask": "q1",
+                "claim": "A claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://a.com",
+            },
+            {
+                "subtask": "q2",
+                "claim": "B claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://b.com",
+            },
+        ],
+        "summary": "summary",
+        "report": (
+            "Second claim [2].\n\n## References\n\n[1] [A](https://a.com)\n"
+        ),
+        "messages": [],
+    }
+    result = await verify_mod.verify_citations(state)
+    report = str(result["report"])
+    # [2] is cited in the body but missing from the LLM's References list —
+    # filled in from findings[1] (1-indexed)
+    assert "[2] [https://b.com](https://b.com)" in report
+    # [1] is no longer cited in the body — dropped as an orphan
+    assert "[1] [A](https://a.com)" not in report
+
+
+async def test_verify_citations_strips_non_numeric_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stray markers like [Synthesis] that leak from the debate transcript are
+    stripped from the final report — they aren't [i] citations and have no
+    References entry, so they'd read as broken citations."""
+    import engine.nodes.verify_citations as verify_mod
+    from eval.schema import FaithfulnessVerdict
+
+    async def fake_checks(
+        report: str, findings: list[object], lead_model: str
+    ) -> tuple[list[FaithfulnessVerdict], list[object], list[object]]:
+        verdicts = [
+            FaithfulnessVerdict(
+                citation_index=1,
+                report_sentence="Faithful claim.",
+                matched_finding_claims=["A claim"],
+                faithful=True,
+                confidence=1.0,
+                reasoning="supported",
+            ),
+        ]
+        return verdicts, [], []
+
+    monkeypatch.setattr(verify_mod, "run_faithfulness_checks", fake_checks)
+
+    state: ResearchState = {
+        "run_id": str(uuid.uuid4()),
+        "query": "test query",
+        "clarification_questions": [],
+        "clarifications": [],
+        "subtasks": [],
+        "findings": [
+            {
+                "subtask": "q1",
+                "claim": "A claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://a.com",
+            }
+        ],
+        "summary": "summary",
+        "report": (
+            "Faithful claim [1]. This echoes the measurement crisis [Synthesis].\n\n"
+            "## References\n\n[1] [A](https://a.com)\n"
+        ),
+        "messages": [],
+    }
+    result = await verify_mod.verify_citations(state)
+    report = str(result["report"])
+    assert "[Synthesis]" not in report
+    assert "This echoes the measurement crisis." in report
+    # The real markdown link in References must survive — only bracket
+    # markers NOT followed by `(url)` are stripped
+    assert "[1] [A](https://a.com)" in report
 
 
 async def test_verify_citations_skips_when_no_findings_or_report() -> None:

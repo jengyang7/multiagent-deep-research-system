@@ -26,11 +26,18 @@ class DebateTurn(TypedDict):
     content: str
 
 
+class VerdictRow(TypedDict):
+    """One judged category in the debate verdict table (shown in the UI)."""
+    category: str    # short label, e.g. "Evidence Quality"
+    assessment: str  # one-sentence summary of the judge's reasoning
+    winner: str       # "proposition" | "opposition" | "draw"
+
+
 class DebateVerdict(TypedDict):
     """The lead model's neutral judgment of the finished debate (debate mode)."""
-    winner: str     # "advocate" | "skeptic" | "draw"
-    reasoning: str  # short justification shown in the UI verdict card
-    model: str      # judge model (the run's lead model)
+    rows: list[VerdictRow]  # per-category breakdown, rendered as a table in the UI
+    winner: str             # overall winner: "proposition" | "opposition" | "draw"
+    model: str              # judge model (the run's lead model)
 
 
 class TokenUsage(TypedDict):

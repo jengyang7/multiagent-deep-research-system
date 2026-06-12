@@ -26,17 +26,26 @@ from engine.usage import usage_from_message
 
 MAX_GAP_QUESTIONS = 3
 
+# Display names for the two debate sides — the underlying `agent` field stays
+# "advocate" | "skeptic" (model selection, SSE routing), but everything the
+# debaters/judge say and everything the UI shows uses this consistent wording.
+_SIDE_LABEL = {"advocate": "Proposition", "skeptic": "Opposition"}
+
 _ADVOCATE_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        "You are the ADVOCATE in a structured research debate. Your job is to "
+        "You are the PROPOSITION in a structured research debate. Your job is to "
         "argue the strongest, best-supported answer to the research query using "
         "ONLY the claims in the research summary below — never invent facts.\n"
         "- Build a clear position: what does the evidence, taken together, "
         "support most strongly?\n"
-        "- Lean on specific claims and figures, and name the source URL when a "
-        "point rests on it.\n"
-        "- If a skeptic has already spoken, rebut their strongest objections "
+        "- Lean on specific claims and figures, and cite them with [1], [2], etc. "
+        "matching the numbered source list below — never write out full URLs.\n"
+        "- When referring to the research summary's own framing or observations "
+        "(as opposed to a specific numbered finding), describe it in plain prose "
+        "(e.g. \"the research summary notes...\") — never invent a bracket marker "
+        "like [Synthesis] for it.\n"
+        "- If the opposition has already spoken, rebut their strongest objections "
         "directly: concede points the evidence cannot answer, and defend points "
         "it can.\n"
         "- Be concise and substantive: 2-4 tight paragraphs, no preamble.",
@@ -44,31 +53,39 @@ _ADVOCATE_PROMPT = ChatPromptTemplate.from_messages([
     (
         "human",
         "Research query: {query}\n\nResearch summary:\n{summary}\n\n"
-        "Debate so far:\n{transcript}\n\nYour turn, Advocate (round {round}).",
+        "Sources:\n{sources}\n\n"
+        "Debate so far:\n{transcript}\n\nYour turn, Proposition (round {round}).",
     ),
 ])
 
 _SKEPTIC_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        "You are the SKEPTIC in a structured research debate. Your job is to "
-        "stress-test the advocate's last argument using ONLY the research "
+        "You are the OPPOSITION in a structured research debate. Your job is to "
+        "stress-test the proposition's last argument using ONLY the research "
         "summary below — never invent counter-facts.\n"
         "- Attack evidence quality: single-source claims, missing data, vague "
         "figures, sources that don't actually support the weight put on them.\n"
         "- Surface gaps, contradictions between findings, and overreach — "
-        "places where the advocate's conclusion goes beyond what the summary "
+        "places where the proposition's conclusion goes beyond what the summary "
         "states.\n"
         "- Point out what a careful reader would still need to know before "
         "accepting the position.\n"
-        "- Concede genuinely strong points; a skeptic who disputes everything "
-        "is useless.\n"
+        "- If you cite specific claims or figures, use [1], [2], etc. matching "
+        "the numbered source list below — never write out full URLs.\n"
+        "- When referring to the research summary's own framing or observations "
+        "(as opposed to a specific numbered finding), describe it in plain prose "
+        "(e.g. \"the research summary notes...\") — never invent a bracket marker "
+        "like [Synthesis] for it.\n"
+        "- Concede genuinely strong points; an opposition that disputes "
+        "everything is useless.\n"
         "- Be concise and substantive: 2-4 tight paragraphs, no preamble.",
     ),
     (
         "human",
         "Research query: {query}\n\nResearch summary:\n{summary}\n\n"
-        "Debate so far:\n{transcript}\n\nYour turn, Skeptic (round {round}).",
+        "Sources:\n{sources}\n\n"
+        "Debate so far:\n{transcript}\n\nYour turn, Opposition (round {round}).",
     ),
 ])
 
@@ -78,8 +95,15 @@ def format_transcript(turns: list[DebateTurn]) -> str:
     if not turns:
         return "(the debate is just beginning)"
     return "\n\n".join(
-        f"[Round {t['round']} — {t['agent'].capitalize()}]\n{t['content']}" for t in turns
+        f"[Round {t['round']} — {_SIDE_LABEL[t['agent']]}]\n{t['content']}" for t in turns
     )
+
+
+def _format_sources(findings: list[dict[str, str]]) -> str:
+    """Numbered source list for [i] citations, matching the synthesizer's numbering."""
+    if not findings:
+        return "(no sources)"
+    return "\n".join(f"[{i}] {f['citation_url']}" for i, f in enumerate(findings, 1))
 
 
 def _run_turn(
@@ -94,6 +118,7 @@ def _run_turn(
     result: BaseMessage = chain.invoke({
         "query": state["query"],
         "summary": state.get("summary", ""),
+        "sources": _format_sources(state.get("findings", [])),  # type: ignore[arg-type]
         "transcript": format_transcript(turns),
         "round": round_no,
     })
@@ -122,25 +147,36 @@ def debate_skeptic(state: ResearchState) -> dict[str, object]:
 # the UI verdict card and history; gap planning and synthesis are unaffected.
 # ---------------------------------------------------------------------------
 
+class VerdictRow(BaseModel):
+    category: str    # short label, e.g. "Evidence Quality"
+    assessment: str  # ONE plain-language sentence, no markdown
+    winner: Literal["proposition", "opposition", "draw"]
+
+
 class DebateJudgment(BaseModel):
-    reasoning: str  # 2-4 sentences: which arguments held up and which collapsed
-    winner: Literal["advocate", "skeptic", "draw"]
+    rows: list[VerdictRow]  # 3-5 categories, based on what was actually contested
+    winner: Literal["proposition", "opposition", "draw"]  # overall verdict
 
 
 _JUDGE_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        "You are the neutral JUDGE of a structured research debate between an "
-        "advocate (argues the best-supported answer) and a skeptic (attacks "
-        "evidence quality and overreach). Decide who argued better — judge the "
-        "ARGUMENTS, not which position you personally favor.\n"
-        "- The advocate wins if their position survived the skeptic's strongest "
-        "objections with evidence from the summary.\n"
-        "- The skeptic wins if they exposed material gaps, contradictions, or "
-        "overreach the advocate could not answer.\n"
-        "- Call it a draw only when the rounds are genuinely balanced.\n"
-        "- In 'reasoning', give 2-4 plain-language sentences citing the decisive "
-        "moments of the debate.",
+        "You are the neutral JUDGE of a structured research debate between a "
+        "PROPOSITION (argues the best-supported answer) and an OPPOSITION "
+        "(attacks evidence quality and overreach). Decide who argued better — "
+        "judge the ARGUMENTS, not which position you personally favor.\n"
+        "- Break your judgment into 3-5 short categories based on what was "
+        "actually contested in this debate (e.g. 'Evidence Quality', "
+        "'Argument Strength', 'Gap Identification', 'Rebuttals').\n"
+        "- For each category, write a 'category' label (1-3 words), a ONE-"
+        "sentence 'assessment' (max ~20 words, plain language, no markdown) "
+        "summarizing the decisive point, and a 'winner' for that category.\n"
+        "- The proposition wins a category if their position held up under "
+        "scrutiny with evidence from the summary.\n"
+        "- The opposition wins a category if they exposed material gaps, "
+        "contradictions, or overreach the proposition could not answer.\n"
+        "- Use 'draw' for a category only when genuinely balanced.\n"
+        "- Finally, give an overall 'winner' for the debate as a whole.",
     ),
     (
         "human",
@@ -165,7 +201,8 @@ def judge_debate(state: ResearchState) -> dict[str, object]:
     assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
     result: DebateJudgment = raw["parsed"]
     usage = usage_from_message(raw["raw"], "judge_debate", model)
-    verdict = DebateVerdict(winner=result.winner, reasoning=result.reasoning, model=model)
+    rows = [row.model_dump() for row in result.rows]
+    verdict = DebateVerdict(rows=rows, winner=result.winner, model=model)  # type: ignore[arg-type]
     return {"debate_verdict": verdict, "token_usage": [usage] if usage else []}
 
 
@@ -187,8 +224,9 @@ _GAP_PROMPT = ChatPromptTemplate.from_messages([
         "system",
         "You are a neutral research lead reviewing an adversarial debate over a "
         "research summary. Identify the evidence GAPS that block a confident "
-        "answer: objections the skeptic raised that the advocate could not rebut "
-        "with the existing findings, and facts both sides agreed were missing.\n"
+        "answer: objections the opposition raised that the proposition could not "
+        "rebut with the existing findings, and facts both sides agreed were "
+        "missing.\n"
         f"- In 'gap_questions': write 0–{MAX_GAP_QUESTIONS} follow-up research "
         "questions targeting those gaps. Each must be self-contained, concrete, "
         "and directly answerable via a web search (name the specific data, "

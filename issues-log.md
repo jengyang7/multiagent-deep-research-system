@@ -112,3 +112,53 @@ monkeypatch.setattr("engine.nodes.synthesize.ChatOpenAI", lambda **kw: mock_llm)
 **Issue:** Many of the 61 informational "uncited sentences" from the same run were specific factual elaborations (e.g. a course's hours, cost, or prerequisites) immediately following a cited topic sentence about the same source — only the first sentence in the paragraph carried `[i]`, leaving the rest uncited even though they came from the same finding.
 
 **Fix:** Added a rule to the "Citation discipline" bullet in `_PROMPT`: when a paragraph describes one source's specifics across several sentences, attach `[i]` to each of those sentences, not just the first — only genuinely analytical/transition sentences (per Issue #8's rule) may stay uncited.
+
+---
+
+### 11. Eval judges hardcoded `ChatOpenAI`, would crash for non-OpenAI eval models
+**Files:** `eval/faithfulness.py`, `eval/completeness.py`, `eval/relevance.py`
+**Issue:** All three LLM-as-judge checks instantiated `ChatOpenAI(model=lead_model, ...)` directly. The eval dashboard's "Run Eval" previously let the user pick any model from `/models` (including Claude/Gemini) as the judge — selecting a non-OpenAI model would fail at the `ChatOpenAI(...)` call.
+
+**Fix:** Routed all three through the existing provider-agnostic `make_chat_model()` + `structured_output_kwargs()` factory (already used in `engine/nodes/*.py`), with the established `assert isinstance(raw, dict)` pattern after `include_raw=True` calls. Also added a fixed `EVAL_MODEL = "claude-haiku-4-5"` in `engine/models.py` (`role_default_models()["eval"]`) and removed the per-run eval-model dropdown entirely — the judge model is now fixed (deliberately a different provider than `LEAD_MODEL`, for the same self-preference-bias reason as the debate skeptic) so "Quality Over Time" and "Community Average" stay apples-to-apples across runs and visitors.
+
+---
+
+### 12. Judge's Verdict card rendered raw markdown as plain text with no paragraph breaks
+**File:** `web/app/page.tsx`
+**Issue:** The verdict card rendered `debateVerdict.reasoning` in a plain `<div>{...}</div>`, so literal `**bold**` markers showed unrendered and the judge's several `**Label:** point` sentences ran together as one unbroken paragraph (unlike `DebateBubble`, which uses `ReactMarkdown`).
+
+**Fix:** Render `debateVerdict.reasoning` through `<ReactMarkdown remarkPlugins={[remarkGfm]}>` with the same prose-styling classes as `DebateBubble`. Since the model emits its points as back-to-back `**Label:**` sentences with no blank lines, added `formatVerdictReasoning()` — a small client-side helper that inserts `\n\n` before each `**Label:**` marker so each point becomes its own paragraph. This also fixes rendering for verdicts already persisted in history/localStorage, since the normalization happens at render time.
+
+---
+
+### 13. `## References` section inconsistent with the report's own `[i]` citations
+**File:** `engine/nodes/verify_citations.py`
+**Issue:** A real exported report (`will-agi-arrive-before-2030`) had `[60][63][65][66][67]` cited inline in the body with NO matching entry in `## References`, and a `[47]` entry in `## References` that was never cited anywhere in the body. The synthesizer free-hands its own References list alongside ~30 inline citations across a ~24K-character report, and can both omit entries it used and list entries it never used — `verify_citations` (which already rewrites the body to strip unfaithful citations) left the LLM's References list untouched, so these inconsistencies shipped straight to the reader.
+
+**Fix:** Added `_rebuild_references()`, called after citation-stripping: parses the synthesizer's own References list via `eval.report_parsing.parse_references()`, then rebuilds the section to exactly match the `[i]` markers still present in the body — keeping the LLM's title/url for indices it got right, dropping orphaned entries for indices no longer cited, and filling in any cited index the LLM's list omitted from `state.findings[i-1]['citation_url']`.
+
+**Note on the "jump":** Sequence gaps like `[10] → [36] → [47]` are partly by design — `[i]` indexes 1-based into the FULL findings list (often 50-100+ items), and only a sparse subset gets cited, so most intermediate indices were simply never referenced. The fix above only addresses genuine *inconsistencies* (orphaned/missing entries), not the gaps themselves; full sequential renumbering (`[1],[2],[3]...` with no gaps) would require remapping every `[i]` marker throughout the body and would be a separate, larger change.
+
+---
+
+### 14. Stray `[Synthesis]` marker leaks from the debate transcript into the final report
+**Files:** `engine/nodes/debate.py`, `engine/nodes/synthesize.py`, `engine/nodes/verify_citations.py`
+**Issue:** The same exported report had `[Synthesis]` appearing twice in the **Final Report** body (e.g. "...the 'measurement crisis' where timelines oscillate based on narrow, noisy capability demonstrations [Synthesis]."). Debaters invent `[Synthesis]` as a pseudo-citation when referring to the research summary's own framing (not a specific numbered finding) — fine in the debate transcript, but the synthesizer copied it verbatim into the final report, where it has no `## References` entry and reads as a broken citation.
+
+**Fix (three-part, defense in depth):** (1) Both debate prompts (`_ADVOCATE_PROMPT`/`_SKEPTIC_PROMPT`) now instruct debaters to describe the research summary's own framing in plain prose instead of inventing a bracket marker for it. (2) The synthesizer's prompt now explicitly forbids any non-numeric bracket citation in the report, even if one appears in the debate transcript it's given. (3) `verify_citations` strips any remaining `[NonNumeric]`-style marker from the body as a safety net (regex excludes `[Title](url)` markdown links).
+
+---
+
+### 15. `tests/test_eval_harness.py` mocked a `ChatOpenAI` attribute removed by Issue #11's fix
+**File:** `tests/test_eval_harness.py`
+**Issue:** Issue #11 routed `eval/faithfulness.py`, `eval/completeness.py`, and `eval/relevance.py` through `make_chat_model()` instead of `ChatOpenAI(...)` directly, but `_mock_structured_chain()` in the test file still did `monkeypatch.setattr(f"{module}.ChatOpenAI", ...)` — `AttributeError: module has no attribute 'ChatOpenAI'`, failing all 5 LLM-judge tests (`uv run pytest` → 5 failed).
+
+**Fix:** Updated `_mock_structured_chain()` to patch `{module}.make_chat_model` instead. `structured_output_kwargs(lead_model)` needed no mocking — it's a pure function. `uv run pytest` → 61 passed.
+
+---
+
+### 16. Step cards stayed open through synthesis; no progress visible outside the page
+**File:** `web/app/page.tsx`
+**Issue:** Two related UX gaps: (1) the Research Plan / Debate / Verdict / Gap Research cards only auto-collapsed on specific later events (`debating`, `gap_plan`, `report`), so e.g. in a no-gap debate run the debate + verdict cards stayed expanded throughout the entire synthesis step; (2) there was no way to see run progress without the tab in focus — the browser tab title stayed static the whole run.
+
+**Fix:** (1) The `synthesizing` SSE handler now collapses all four step cards at once — by the time synthesis starts, every earlier step (planning, research, debate, judging, gap research) is complete in every flow. (2) Added a `useEffect` that sets `document.title` to `"<progress>% · <current milestone> — MindClash"` while `phase === 'researching'`, reverting to `"MindClash"` otherwise — so the active step and progress are visible from the browser tab/taskbar.

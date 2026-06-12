@@ -57,6 +57,10 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "attach [i] to EACH of those sentences, not just the first — do not let the "
         "citation 'fall off' partway through a paragraph. Only the analytical/transition "
         "sentences described above may be left uncited.\n"
+        "- The ONLY valid bracket citations are [1], [2], etc. matching the numbered "
+        "findings. Never use a non-numeric bracket marker (e.g. [Synthesis]) anywhere "
+        "in the report, even if one appears in the debate transcript below — "
+        "rephrase any such reference as plain prose instead.\n"
         "- Do NOT embed full URLs or hyperlinks inside the body text.\n"
         "- Do not introduce any information not present in the provided findings.\n"
         "- End with a ## References section formatted exactly as:\n"
@@ -72,12 +76,13 @@ _PROMPT = ChatPromptTemplate.from_messages([
 
 # Appended to the human message when debate mode produced a transcript.
 _DEBATE_INSTRUCTIONS = (
-    "\n\nAn adversarial debate between an advocate and a skeptic was held over "
-    "these findings. Use it to calibrate confidence: present claims the advocate "
-    "successfully defended with appropriate strength, and explicitly surface the "
-    "caveats, gaps, and counterpoints the skeptic raised that survived rebuttal. "
-    "Do not quote or mention the debaters — the report must still derive every "
-    "fact and citation from the findings above.\n\nDebate transcript:\n"
+    "\n\nAn adversarial debate between a proposition and an opposition was held "
+    "over these findings. Use it to calibrate confidence: present claims the "
+    "proposition successfully defended with appropriate strength, and explicitly "
+    "surface the caveats, gaps, and counterpoints the opposition raised that "
+    "survived rebuttal. Do not quote or mention the debaters — the report must "
+    "still derive every fact and citation from the findings above.\n\n"
+    "Debate transcript:\n"
 )
 
 

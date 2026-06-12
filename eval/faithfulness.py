@@ -10,10 +10,9 @@ Sentences with no citation marker are surfaced separately as informational
 from __future__ import annotations
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model, structured_output_kwargs
 from engine.state import SubtaskFinding, TokenUsage
 from engine.usage import usage_from_message
 from eval.report_parsing import (
@@ -142,15 +141,16 @@ async def run_faithfulness_checks(
             continue
 
         if chain is None:
-            judge_llm = ChatOpenAI(model=lead_model, temperature=0)
+            judge_llm = make_chat_model(lead_model, temperature=0)
             chain = _JUDGE_PROMPT | judge_llm.with_structured_output(
-                _JudgeVerdict, method="function_calling", include_raw=True
+                _JudgeVerdict, **structured_output_kwargs(lead_model), include_raw=True
             )
 
         raw = await chain.ainvoke({
             "sentence": clean_sentence,
             "findings_text": _format_findings_for_judge(candidate_findings),
         })
+        assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
         verdict: _JudgeVerdict = raw["parsed"]
         usage = usage_from_message(raw["raw"], "faithfulness", lead_model)
         if usage:

@@ -111,17 +111,23 @@ def test_plan_gap_research_returns_capped_questions(monkeypatch: pytest.MonkeyPa
     state = _base_state(debate_turns=[_turn("advocate", 1), _turn("skeptic", 1)])
     result = plan_gap_research(state)
     assert result["gap_subtasks"] == [f"gap {i}" for i in range(MAX_GAP_QUESTIONS)]
-    assert "[Round 1 — Skeptic]" in str(captured["transcript"])
+    assert "[Round 1 — Opposition]" in str(captured["transcript"])
 
 
 def test_judge_debate_returns_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
     import engine.nodes.debate as debate_mod
-    from engine.nodes.debate import judge_debate
+    from engine.nodes.debate import VerdictRow, judge_debate
 
     captured: dict[str, object] = {}
     parsed = MagicMock()
-    parsed.winner = "skeptic"
-    parsed.reasoning = "the advocate could not answer the cost objection"
+    parsed.winner = "opposition"
+    parsed.rows = [
+        VerdictRow(
+            category="Evidence Quality",
+            assessment="The proposition could not answer the cost objection.",
+            winner="opposition",
+        ),
+    ]
     raw_msg = MagicMock()
     raw_msg.usage_metadata = None
 
@@ -141,11 +147,15 @@ def test_judge_debate_returns_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = judge_debate(state)
     assert result["debate_verdict"] == {
-        "winner": "skeptic",
-        "reasoning": "the advocate could not answer the cost objection",
+        "winner": "opposition",
+        "rows": [{
+            "category": "Evidence Quality",
+            "assessment": "The proposition could not answer the cost objection.",
+            "winner": "opposition",
+        }],
         "model": "gpt-5.4",
     }
-    assert "[Round 1 — Advocate]" in str(captured["transcript"])
+    assert "[Round 1 — Proposition]" in str(captured["transcript"])
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +225,8 @@ def test_format_transcript() -> None:
 
     assert "beginning" in format_transcript([])
     text = format_transcript([_turn("advocate", 1), _turn("skeptic", 1)])
-    assert "[Round 1 — Advocate]" in text
-    assert "[Round 1 — Skeptic]" in text
+    assert "[Round 1 — Proposition]" in text
+    assert "[Round 1 — Opposition]" in text
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +260,7 @@ def test_synthesize_includes_debate_transcript(monkeypatch: pytest.MonkeyPatch) 
     synthesize(state)
     section = str(captured["debate_section"])
     assert "Debate transcript" in section
-    assert "[Round 1 — Advocate]" in section
+    assert "[Round 1 — Proposition]" in section
 
 
 def test_synthesize_empty_debate_section_without_debate(
@@ -298,7 +308,7 @@ def test_role_defaults_fall_back_without_provider_keys(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     defaults = role_default_models()
-    assert defaults == {"lead": "gpt-5.4", "advocate": "gpt-5.4", "skeptic": "gpt-5.4"}
+    assert defaults == {"lead": "gpt-5.4", "advocate": "gpt-5.4", "skeptic": "gpt-5.4", "eval": "gpt-5.4"}
 
 
 def test_role_defaults_use_cross_provider_models_when_available(
