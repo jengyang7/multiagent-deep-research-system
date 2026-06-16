@@ -1096,8 +1096,8 @@ export default function Home() {
     } catch (e) { setError(String(e)); setPhase('error'); }
   }
 
-  async function sendChat() {
-    const q = chatInput.trim();
+  async function sendChat(override?: string) {
+    const q = (override ?? chatInput).trim();
     if (!q || chatStreaming) return;
     setChatInput(''); setChatStreaming(true);
     const historySnap = [...chatMessages];
@@ -1985,6 +1985,25 @@ export default function Home() {
                           </div>
                         ))}
                         <div ref={chatEndRef} />
+                      </div>
+                    )}
+                    {chatMessages.length === 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          'Summarize the key findings in 3 bullet points',
+                          'What is the strongest evidence here?',
+                          'What are the main uncertainties or limitations?',
+                          'What should I research next?',
+                        ].map(q => (
+                          <button
+                            key={q}
+                            onClick={() => sendChat(q)}
+                            disabled={chatStreaming}
+                            className="text-xs border border-gray-200 rounded-full px-3 py-1.5 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors disabled:opacity-40"
+                          >
+                            {q}
+                          </button>
+                        ))}
                       </div>
                     )}
                     <div className="flex gap-2">

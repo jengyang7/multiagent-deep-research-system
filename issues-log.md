@@ -194,3 +194,46 @@ monkeypatch.setattr("engine.nodes.synthesize.ChatOpenAI", lambda **kw: mock_llm)
 **Issue:** Issue #17 fixed `_REF_LINE_RE` to also accept numbered-list reference formatting, but a real exported report (`will-ai-create-more-jobs-than-it-destroys-2026-06-15.md`, debate mode + gap research, 16 sources) still came back with a totally empty `## References` section — and this time **every** `[1]`/`[2]` inline citation was gone from the body too, not just the reference list. Root cause: the synthesizer's report had no `## References` section in *any* recognizable format, so `parse_references(report)` returned an empty `citation_map`. In `run_faithfulness_checks`, every cited sentence then had `citation_map.get(index) is None` for all its indices → zero `candidate_findings` → automatic `faithful=False` ("citation [i] not found in the References section") for literally every cited sentence in the report. `verify_citations` stripped every `[i]` marker in response, so `_rebuild_references` saw `cited = {}` and returned a bare `"\n\n## References\n"`.
 
 **Fix:** `run_faithfulness_checks` now mirrors `_rebuild_references`'s existing fallback: when `citation_map.get(index)` is `None` but `1 <= index <= len(findings)`, it uses `findings[index - 1]` directly as the candidate finding (the same 1-indexed mapping `_rebuild_references` already relies on for indices the synthesizer's list omitted) instead of auto-failing. The judge now gets a real finding to check the sentence against, so a missing/malformed References section no longer wholesale-strips every citation in the report. `uv run pytest` → 61 passed.
+
+---
+
+### 21. References still empty — synthesizer produced zero `[i]` inline citations (root cause)
+**File:** `engine/nodes/synthesize.py`
+**Issue:** Issues #17–#20 treated `verify_citations` as the culprit (stripping citations that existed), but DB inspection confirmed the stored reports had ZERO `[i]` markers in the body and NO `## References` section whatsoever — meaning the **synthesizer itself never wrote any inline citations**. Root cause: `compact_findings` produces a prose narrative with source URLs embedded in text but NO pre-numbered `[1]`, `[2]`... anchors. When the synthesizer receives this prose as `findings_text`, it has no explicit `[i]` → URL mapping to work from, so it produces well-structured prose without any citation markers (especially with smaller/faster models like Claude Haiku 4.5 on long contexts with 100+ findings).
+
+**Fix:** Added `_source_list(findings)`, which builds a deduplicated, numbered list of source URLs (first-occurrence order) and appends it to the compact summary in `findings_text`. The synthesizer now receives:
+
+```
+<prose summary>
+
+Source URLs — use [i] from this list for your inline citations and References section:
+[1] [https://source1.com](https://source1.com)
+[2] [https://source2.com](https://source2.com)
+...
+```
+
+This gives an explicit `[i]` → URL anchor in the exact format the synthesizer needs to reproduce in its own References section, without replacing the prose summary that conveys the actual research content. For runs where `summary` is empty (compact skipped), `_format_findings` already provides explicit `[i]` numbered findings, so no change needed for that path.
+
+---
+
+### 22. References section rendered as a single run-on paragraph instead of a vertical list
+**Files:** `engine/nodes/verify_citations.py`
+**Issue:** `_rebuild_references()` joined entries with `"\n".join(entries)`, producing a single `\n`-separated block. ReactMarkdown treats inline newlines within a block as a soft break (renders as a space), so all reference entries appeared on one line in the browser — e.g. `[1] [Title1](url1) [2] [Title2](url2) ...` instead of a stacked list.
+
+**Fix:** Changed separator from `"\n".join(entries)` to `"\n\n".join(entries)` so each entry is a separate Markdown paragraph; ReactMarkdown renders each as its own `<p>`, giving the expected vertical list.
+
+---
+
+### 23. Follow-up Chat section had no quick-start prompts when chat history was empty
+**File:** `web/app/page.tsx`
+**Issue:** Users landed on a blank chat input with no cues about what to ask — first-time users especially didn't know where to start.
+
+**Fix:** Added four suggested-question chips rendered above the input row only when `chatMessages.length === 0`. Clicking a chip calls `sendChat(questionText)` directly (using the `override` param added to `sendChat`). Chips are hidden as soon as the first message is sent. Questions: "Summarize the key findings in 3 bullet points", "What is the strongest evidence here?", "What are the main uncertainties or limitations?", "What should I research next?"
+
+---
+
+### 24. Final report body had no visual hierarchy for key data points
+**File:** `engine/nodes/synthesize.py`
+**Issue:** The synthesizer wrote well-structured prose but never used bold, so key statistics and critical conclusions were buried in paragraph text and hard to scan.
+
+**Fix:** Added a formatting rule to `_PROMPT` instructing the model to use `**bold**` for key statistics, critical conclusions, and the most important findings — approximately 1–3 phrases per section, not entire sentences.

@@ -5,7 +5,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from engine.models import LEAD_MODEL, make_chat_model
 from engine.nodes.debate import format_transcript
-from engine.state import ResearchState
+from engine.state import ResearchState, SubtaskFinding
 from engine.usage import usage_from_message
 
 _PROMPT = ChatPromptTemplate.from_messages([
@@ -66,7 +66,10 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "- End with a ## References section formatted exactly as:\n"
         "  [1] [Source Title](url)\n"
         "  [2] [Source Title](url)\n"
-        "- If findings are sparse or contradictory, note it explicitly in the report.",
+        "- If findings are sparse or contradictory, note it explicitly in the report.\n"
+        "- Use **bold** to highlight key statistics, critical conclusions, and the most "
+        "important findings — typically 1–3 phrases per section. Do not bold entire sentences "
+        "or routine facts.",
     ),
     (
         "human",
@@ -86,7 +89,7 @@ _DEBATE_INSTRUCTIONS = (
 )
 
 
-def _format_findings(findings: list[dict[str, str]]) -> str:
+def _format_findings(findings: list[SubtaskFinding]) -> str:
     if not findings:
         return "(no findings collected)"
     lines = []
@@ -100,11 +103,38 @@ def _format_findings(findings: list[dict[str, str]]) -> str:
     return "\n\n".join(lines)
 
 
+def _source_list(findings: list[SubtaskFinding]) -> str:
+    """Numbered deduplicated source list appended to the compact summary.
+
+    The compact summary is prose (no [i] numbering), so the synthesizer has no
+    explicit anchor to assign [i] markers to. Appending a pre-numbered list of
+    unique source URLs gives it a clear [i] → URL mapping to cite from — the
+    same list verify_citations uses as a fallback when rebuilding References.
+    """
+    seen: list[str] = []
+    for f in findings:
+        url = f.get("citation_url", "")
+        if url and url not in seen:
+            seen.append(url)
+    if not seen:
+        return ""
+    lines = ["\n\nSource URLs — use [i] from this list for your inline citations and References section:"]
+    for i, url in enumerate(seen, 1):
+        lines.append(f"[{i}] [{url}]({url})")
+    return "\n".join(lines)
+
+
 def synthesize(state: ResearchState) -> dict[str, object]:
     """Write a cited Markdown report from compacted summary or raw findings (synthesize node)."""
-    # Prefer the compacted summary (layer 2) — fall back to raw findings if compact was skipped
+    # Prefer the compacted summary (layer 2) — fall back to raw findings if compact was skipped.
+    # When using the summary (prose, no [i] numbering), append a pre-numbered source list so the
+    # synthesizer has an explicit [i] → URL anchor to cite from.
     summary = state.get("summary", "")
-    findings_text = summary if summary else _format_findings(state.get("findings", []))  # type: ignore[arg-type]
+    findings: list[SubtaskFinding] = state.get("findings", [])
+    if summary:
+        findings_text = summary + _source_list(findings)
+    else:
+        findings_text = _format_findings(findings)
     # Debate mode: feed the transcript in so the report reflects what survived scrutiny
     debate_turns = state.get("debate_turns", [])
     debate_section = (

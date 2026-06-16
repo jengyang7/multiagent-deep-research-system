@@ -83,16 +83,17 @@ def _rebuild_references(
     if not cited:
         return "\n\n## References\n"
     parsed = parse_references(references)
-    lines = ["", "## References", ""]
+    entries: list[str] = []
     for i in cited:
         if i in parsed:
             ref = parsed[i]
-            lines.append(f"[{i}] [{ref.title}]({ref.url})")
+            entries.append(f"[{i}] [{ref.title}]({ref.url})")
         elif 1 <= i <= len(findings):
             url = findings[i - 1]["citation_url"]
-            lines.append(f"[{i}] [{url}]({url})")
-    lines.append("")
-    return "\n".join(lines)
+            entries.append(f"[{i}] [{url}]({url})")
+    # Double-newline between entries so ReactMarkdown renders each as its own
+    # paragraph (vertically stacked) rather than a single run-on line.
+    return "\n\n## References\n\n" + "\n\n".join(entries) + "\n"
 
 
 async def verify_citations(state: ResearchState) -> dict[str, object]:
