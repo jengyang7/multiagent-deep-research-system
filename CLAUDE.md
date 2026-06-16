@@ -56,8 +56,10 @@ pnpm build
 | Research subagents (N, parallel) | gpt-5.4-nano | `search → fetch → extract` loop → returns `Finding(claim, evidenceSpan, citationUrl)` |
 | Synthesizer | gpt-5.4 | Writes final cited Markdown report from compacted findings |
 | Chat | gpt-5.4 | Follow-up Q&A grounded in findings stored in checkpointer state |
+| Debate advocate (debate mode) | claude-sonnet-4-6 | Argues the strongest evidence-backed answer over the compacted findings |
+| Debate skeptic (debate mode) | gemini-3.1-pro-preview | Attacks evidence quality, gaps, and overreach in the advocate's argument |
 
-Model IDs live in `engine/models.py` — **verify against https://platform.openai.com/docs/models before running**, do not trust memory.
+Model IDs live in `engine/models.py` — **verify against the provider docs before running** (OpenAI/Anthropic/Google links at the top of that file), do not trust memory. `make_chat_model()` routes a model id to its provider's LangChain package; user-selectable models are gated by which provider API keys are set.
 
 ### Three-layer memory stack (the showcase)
 
@@ -75,6 +77,10 @@ Model IDs live in `engine/models.py` — **verify against https://platform.opena
 query → clarify (interrupt if ambiguous) → plan → Send fan-out → N subagents
       → compact → synthesize → cited report → follow-up chat
 ```
+
+### Debate mode (optional, off by default)
+
+`POST /research` with `debate: true` routes compact → `debate_advocate` ⇄ `debate_skeptic` (2 rounds, loop edges in `engine/orchestrator.py`) → `judge_debate` → **debate-driven gap research** → synthesize. After the final round, `judge_debate` (lead model, neutral) declares a winner — advocate / skeptic / draw — streamed as a `debate_verdict` SSE event and rendered as a verdict card in the UI. Then `plan_gap_research` (lead model, neutral) distills the skeptic's unresolved objections into ≤3 follow-up questions, a second `Send` fan-out (`gap_subagent`, same subagent fn under a separate node name) researches them, and `recompact` folds the new findings into the summary — skipped entirely when the debate surfaces no gaps. Each turn is its own node execution so turns stream as `debate_turn` SSE events and checkpoint individually; debate runs also add `stream_mode="messages"` so turns live-stream token-by-token as `debate_token` events (rendered as chat bubbles in the UI). The gap round streams as `gap_planning` / `gap_plan` / `subtask_done {stage:"gap"}` events. Debaters default to **different AI companies** (uncorrelated errors; the lead stays a neutral third party) and are user-selectable per role. The synthesizer consumes the transcript to calibrate confidence; `verify_citations` is unaffected. Nodes live in `engine/nodes/debate.py`.
 
 ### Anti-hallucination
 
@@ -107,6 +113,6 @@ Tables: `research_runs`, `subtasks`, `sources`, `findings`, `reports` + LangGrap
 
 ## Key constraints
 
-- LangChain footprint: `langgraph` + `langchain-core` + `langchain-openai` only — **not** the monolithic `langchain` package.
+- LangChain footprint: `langgraph` + `langchain-core` + thin per-provider packages (`langchain-openai`, `langchain-anthropic`, `langchain-google-genai`) only — **not** the monolithic `langchain` package.
 - No RAG / pgvector in v1. Vector long-term memory is the documented Phase 5 growth path.
 - Each layer of the memory stack must be visibly labeled in code comments so the design is legible to a reviewer.

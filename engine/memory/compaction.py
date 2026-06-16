@@ -5,9 +5,8 @@ never blows its context window, even on large fan-outs.
 from __future__ import annotations
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model
 from engine.state import SubtaskFinding, TokenUsage
 from engine.usage import usage_from_message
 
@@ -46,7 +45,7 @@ def compact_findings(
 ) -> tuple[str, TokenUsage | None]:
     """Summarize raw findings into a compact string for the synthesizer."""
     findings_text = _format_for_compaction(findings)
-    llm: ChatOpenAI = ChatOpenAI(model=lead_model, temperature=0)
+    llm = make_chat_model(lead_model, temperature=0)
     chain = _PROMPT | llm
     result = chain.invoke({"findings_text": findings_text})
     usage = usage_from_message(result, "compact", lead_model)
