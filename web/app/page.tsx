@@ -527,7 +527,9 @@ function Sidebar({
             <p className="px-3 py-2 text-xs text-gray-400">No research yet</p>
           ) : publicRuns.map(run => {
             const localEntry = history.find(h => h.runId === run.id);
-            const isActive = view === 'research' && run.id === activeId;
+            // activeId is a localStorage UUID for local entries, or the database run ID
+            // for public-only runs — check both so local entries highlight correctly.
+            const isActive = view === 'research' && (run.id === activeId || (localEntry != null && localEntry.id === activeId));
             const isLive = !!localEntry && isActive && (localEntry.phase === 'researching' || localEntry.phase === 'querying' || localEntry.phase === 'clarifying');
             const isDisabled = locked && !isActive;
             return (
@@ -546,10 +548,10 @@ function Sidebar({
               >
                 <span className="flex-1 truncate">{run.title || run.query || 'Untitled'}</span>
                 {isLive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />}
-                {localEntry && (
+                {localEntry && !isLive && (
                   <button
                     onClick={e => onDelete(localEntry.id, e)}
-                    className="flex-shrink-0 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity p-0.5"
+                    className={`flex-shrink-0 text-gray-400 hover:text-red-500 transition-opacity p-0.5 ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                     aria-label="Delete research"
                   >
                     <TrashIcon />
@@ -790,7 +792,7 @@ export default function Home() {
   useEffect(() => {
     fetch(`${API}/runs?status=done&limit=30`)
       .then(res => res.json())
-      .then((runs: {id: string; title: string; query: string}[]) => setPublicRuns(runs))
+      .then((data: unknown) => setPublicRuns(Array.isArray(data) ? data : []))
       .catch(() => { /* non-critical */ });
   }, []);
 
