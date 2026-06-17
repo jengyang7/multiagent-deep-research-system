@@ -11,10 +11,9 @@ Two-step "must-cover checklist":
 from __future__ import annotations
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model, structured_output_kwargs
 from engine.state import TokenUsage
 from engine.usage import usage_from_message
 from eval.report_parsing import split_body_and_references
@@ -75,11 +74,12 @@ async def generate_expected_subtopics(
     query: str, lead_model: str = LEAD_MODEL
 ) -> tuple[list[str], TokenUsage | None]:
     """Ask the judge what subtopics a thorough report on `query` should cover."""
-    judge_llm = ChatOpenAI(model=lead_model, temperature=0)
+    judge_llm = make_chat_model(lead_model, temperature=0)
     chain = _SUBTOPICS_PROMPT | judge_llm.with_structured_output(
-        _SubtopicList, method="function_calling", include_raw=True
+        _SubtopicList, **structured_output_kwargs(lead_model), include_raw=True
     )
     raw = await chain.ainvoke({"query": query})
+    assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
     result: _SubtopicList = raw["parsed"]
     usage = usage_from_message(raw["raw"], "completeness_subtopics", lead_model)
     return result.subtopics[:_MAX_SUBTOPICS], usage
@@ -94,14 +94,15 @@ async def score_completeness(
 
     body, _ = split_body_and_references(report)
 
-    judge_llm = ChatOpenAI(model=lead_model, temperature=0)
+    judge_llm = make_chat_model(lead_model, temperature=0)
     chain = _COVERAGE_PROMPT | judge_llm.with_structured_output(
-        _CoverageList, method="function_calling", include_raw=True
+        _CoverageList, **structured_output_kwargs(lead_model), include_raw=True
     )
     raw = await chain.ainvoke({
         "subtopics": "\n".join(f"- {s}" for s in subtopics),
         "report_body": body,
     })
+    assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
     result: _CoverageList = raw["parsed"]
     usage = usage_from_message(raw["raw"], "completeness_coverage", lead_model)
 

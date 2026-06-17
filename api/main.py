@@ -26,9 +26,15 @@ from sse_starlette.sse import EventSourceResponse
 from db.models import EvalReportRecord, Report, ResearchRun
 from engine.memory import rag
 from engine.memory.checkpointer import get_checkpointer
-from engine.models import LEAD_MODEL, LEAD_MODEL_OPTIONS, SUBAGENT_MODEL, estimate_cost_usd
+from engine.models import (
+    LEAD_MODEL,
+    SUBAGENT_MODEL,
+    available_model_options,
+    estimate_cost_usd,
+    role_default_models,
+)
 from engine.nodes.chat import answer_followup
-from engine.orchestrator import build_graph
+from engine.orchestrator import DEFAULT_DEBATE_ROUNDS, build_graph
 from engine.state import TokenUsage
 from eval.harness import evaluate_run
 
@@ -107,6 +113,10 @@ async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
 class ResearchRequest(BaseModel):
     query: str
     model: str | None = None
+    # Debate mode: two cross-provider agents argue over the findings pre-synthesis
+    debate: bool = False
+    advocate_model: str | None = None
+    skeptic_model: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -200,13 +210,23 @@ def _evt(data: dict) -> dict[str, str]:
 async def _stream_graph(
     run_id: str,
     input_: dict | Command,  # type: ignore[type-arg]
+    debate_mode: bool = False,
+    debate_rounds: int = DEFAULT_DEBATE_ROUNDS,
 ) -> AsyncGenerator[dict[str, str], None]:
     """Stream LangGraph node updates as SSE events.
 
     Events emitted (data field is JSON):
       started             {type, run_id}
       plan                {type, subtasks: [...]}
-      subtask_done        {type, question, findings_count}
+      subtask_done        {type, question, findings_count, stage: "plan"|"gap"}
+      debating            {type}                      (debate mode only)
+      debate_token        {type, agent, content}      (debate mode only, per LLM token)
+      debate_turn         {type, agent, model, round, content}  (debate mode only)
+      judging             {type}                      (debate mode only)
+      debate_verdict      {type, winner, rows: [{category, assessment, winner}], model}  (debate mode only)
+      gap_planning        {type}                      (debate mode only)
+      gap_plan            {type, subtasks: [...]}     (debate mode only)
+      synthesizing        {type}
       report              {type, content, run_id}
       clarification_needed {type, run_id, questions: [...]}
       done                {type, run_id, usage: {...}}
@@ -221,7 +241,23 @@ async def _stream_graph(
     try:
         await _update_run(run_id, "running")
 
-        async for chunk in _graph.astream(input_, config, stream_mode="updates"):  # type: ignore[misc]
+        # "messages" mode taps LLM token callbacks inside nodes — only needed to
+        # live-stream debate turns, so plain runs keep the cheaper updates-only stream.
+        stream_modes = ["updates", "messages"] if debate_mode else ["updates"]
+
+        async for mode, chunk in _graph.astream(input_, config, stream_mode=stream_modes):  # type: ignore[misc]
+            if mode == "messages":
+                msg_chunk, meta = chunk
+                node = meta.get("langgraph_node", "")
+                # .text, not .content: Gemini chunks carry content-block lists
+                if node in ("debate_advocate", "debate_skeptic") and msg_chunk.text:
+                    yield _evt({
+                        "type": "debate_token",
+                        "agent": "advocate" if node == "debate_advocate" else "skeptic",
+                        "content": msg_chunk.text,
+                    })
+                continue
+
             for node_name, node_output in chunk.items():
 
                 if node_name == "plan":
@@ -235,7 +271,7 @@ async def _stream_graph(
                         yield _evt({"type": "plan_thinking", "content": thinking})
                     yield _evt({"type": "plan", "subtasks": subtasks, "title": title})
 
-                elif node_name == "subagent":
+                elif node_name in ("subagent", "gap_subagent"):
                     findings: list[dict] = node_output.get("findings", [])  # type: ignore[union-attr]
                     processed: list[str] = node_output.get("processed_subtasks", [])
                     fallback = findings[0]["subtask"] if findings else ""
@@ -248,10 +284,48 @@ async def _stream_graph(
                         "question": question,
                         "findings_count": len(findings),
                         "sources": sources,
+                        # "gap" = second, debate-driven research round
+                        "stage": "gap" if node_name == "gap_subagent" else "plan",
                     })
 
                 elif node_name == "compact":
+                    yield _evt({"type": "debating" if debate_mode else "synthesizing"})
+
+                elif node_name == "recompact":
+                    # Gap findings folded back into the summary — synthesis is next
                     yield _evt({"type": "synthesizing"})
+
+                elif node_name == "plan_gap_research":
+                    gaps: list[str] = node_output.get("gap_subtasks", [])  # type: ignore[union-attr]
+                    if gaps:
+                        yield _evt({"type": "gap_plan", "subtasks": gaps})
+                    else:
+                        # Debate surfaced no material gaps — straight to synthesis
+                        yield _evt({"type": "synthesizing"})
+
+                elif node_name in ("debate_advocate", "debate_skeptic"):
+                    turns: list[dict] = node_output.get("debate_turns", [])  # type: ignore[union-attr]
+                    if turns:
+                        turn = turns[0]
+                        yield _evt({
+                            "type": "debate_turn",
+                            "agent": turn["agent"],
+                            "model": turn["model"],
+                            "round": turn["round"],
+                            "content": turn["content"],
+                        })
+                        # The skeptic's final-round turn ends the debate loop;
+                        # next the neutral lead judges the debate
+                        if node_name == "debate_skeptic" and turn["round"] >= debate_rounds:
+                            yield _evt({"type": "judging"})
+
+                elif node_name == "judge_debate":
+                    verdict: dict | None = node_output.get("debate_verdict")  # type: ignore[union-attr]
+                    if verdict:
+                        yield _evt({"type": "debate_verdict", **verdict})
+                    # Judgment done — the lead now distills unresolved objections
+                    # into gap questions
+                    yield _evt({"type": "gap_planning"})
 
                 elif node_name == "verify_citations":
                     report: str = node_output.get("report", "")  # type: ignore[union-attr]
@@ -309,11 +383,13 @@ async def _stream_graph(
 
 @app.get("/models")
 async def list_models() -> dict[str, object]:
-    """Lead models selectable on the New Research page, plus the default."""
+    """Models selectable in the UI (filtered by available provider API keys) + per-role defaults."""
+    defaults = role_default_models()
     return {
-        "default": LEAD_MODEL,
+        "default": defaults["lead"],  # backward compat with the lead picker
+        "defaults": defaults,
         "options": [
-            {"id": model_id, **meta} for model_id, meta in LEAD_MODEL_OPTIONS.items()
+            {"id": model_id, **meta} for model_id, meta in available_model_options().items()
         ],
     }
 
@@ -322,9 +398,18 @@ async def list_models() -> dict[str, object]:
 async def start_research(body: ResearchRequest, request: Request) -> EventSourceResponse:
     assert _session_factory is not None
 
-    if body.model is not None and body.model not in LEAD_MODEL_OPTIONS:
-        raise HTTPException(400, f"Unknown model: {body.model}")
-    lead_model = body.model or LEAD_MODEL
+    available = available_model_options()
+    for field, value in (
+        ("model", body.model),
+        ("advocate_model", body.advocate_model),
+        ("skeptic_model", body.skeptic_model),
+    ):
+        if value is not None and value not in available:
+            raise HTTPException(400, f"Unknown or unavailable {field}: {value}")
+    defaults = role_default_models()
+    lead_model = body.model or defaults["lead"]
+    advocate_model = body.advocate_model or defaults["advocate"]
+    skeptic_model = body.skeptic_model or defaults["skeptic"]
 
     run_id = str(uuid.uuid4())
     async with _session_factory() as session:
@@ -349,8 +434,14 @@ async def start_research(body: ResearchRequest, request: Request) -> EventSource
         "messages": [],
         "token_usage": [],
         "processed_subtasks": [],
+        # Debate mode (explicit init matters — debate_turns is a reducer channel)
+        "debate_mode": body.debate,
+        "debate_rounds": DEFAULT_DEBATE_ROUNDS,
+        "advocate_model": advocate_model,
+        "skeptic_model": skeptic_model,
+        "debate_turns": [],
     }
-    return EventSourceResponse(_stream_graph(run_id, initial_state))
+    return EventSourceResponse(_stream_graph(run_id, initial_state, debate_mode=body.debate))
 
 
 @app.post("/runs/{run_id}/resume")
@@ -366,7 +457,23 @@ async def resume_run(run_id: str, body: ResumeRequest) -> EventSourceResponse:
         if run.status != "awaiting_clarification":
             raise HTTPException(400, f"Run is not awaiting clarification (status={run.status})")
 
-    return EventSourceResponse(_stream_graph(run_id, Command(resume=body.answers)))
+    # Read debate config from the checkpoint, not the request — a debate run
+    # that paused for clarification must keep streaming debate events on resume.
+    snapshot = await _graph.aget_state({"configurable": {"thread_id": run_id}})
+    debate_mode = bool(snapshot.values.get("debate_mode", False)) if snapshot else False
+    debate_rounds = (
+        int(snapshot.values.get("debate_rounds", DEFAULT_DEBATE_ROUNDS))
+        if snapshot else DEFAULT_DEBATE_ROUNDS
+    )
+
+    return EventSourceResponse(
+        _stream_graph(
+            run_id,
+            Command(resume=body.answers),
+            debate_mode=debate_mode,
+            debate_rounds=debate_rounds,
+        )
+    )
 
 
 @app.get("/runs/{run_id}")
@@ -384,9 +491,13 @@ async def get_run(run_id: str) -> dict[str, object]:
     snapshot = await _graph.aget_state(config)
     report = ""
     findings: list[object] = []
+    debate_turns: list[object] = []
+    debate_verdict: object = None
     if snapshot:
         report = snapshot.values.get("report", "")  # type: ignore[union-attr]
         findings = snapshot.values.get("findings", [])  # type: ignore[union-attr]
+        debate_turns = snapshot.values.get("debate_turns", [])  # type: ignore[union-attr]
+        debate_verdict = snapshot.values.get("debate_verdict")  # type: ignore[union-attr]
 
     return {
         "id": run.id,
@@ -397,6 +508,8 @@ async def get_run(run_id: str) -> dict[str, object]:
         "clarifications": run.clarifications,
         "report": report,
         "findings": findings,
+        "debate_turns": debate_turns,
+        "debate_verdict": debate_verdict,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }
@@ -467,9 +580,9 @@ async def run_eval(
     """Run the eval harness (eval/harness.py) against a completed run and persist the result."""
     assert _session_factory is not None
 
-    if model is not None and model not in LEAD_MODEL_OPTIONS:
-        raise HTTPException(400, f"Unknown model: {model}")
-    eval_model = model or "gpt-5.4-mini"
+    if model is not None and model not in available_model_options():
+        raise HTTPException(400, f"Unknown or unavailable model: {model}")
+    eval_model = model or role_default_models()["eval"]
 
     async with _session_factory() as session:
         result = await session.execute(select(ResearchRun).where(ResearchRun.id == run_id))
@@ -548,6 +661,45 @@ async def global_eval_summary() -> dict[str, object]:
     }
 
 
+@app.get("/eval/reports/community")
+async def community_eval_trend(limit: int = 200) -> list[dict[str, object]]:
+    """Time-ordered eval counts across every visitor, for the public "Quality Over
+    Time" trend chart.
+
+    Unscoped by client_id on purpose (same rationale as /eval/summary) — exposes
+    only the aggregate counts needed to compute grounding/faithfulness rate per
+    report, never query text or identifiers, so individual reports can't be
+    drilled into from this endpoint.
+    """
+    assert _session_factory is not None
+
+    stmt = (
+        select(
+            EvalReportRecord.generated_at,
+            EvalReportRecord.total_findings,
+            EvalReportRecord.ungrounded_count,
+            EvalReportRecord.total_citations,
+            EvalReportRecord.unfaithful_count,
+        )
+        .order_by(EvalReportRecord.generated_at.desc())
+        .limit(limit)
+    )
+    async with _session_factory() as session:
+        result = await session.execute(stmt)
+        rows = result.all()
+
+    return [
+        {
+            "generated_at": generated_at.isoformat() if generated_at else None,
+            "total_findings": total_findings,
+            "ungrounded_count": ungrounded_count,
+            "total_citations": total_citations,
+            "unfaithful_count": unfaithful_count,
+        }
+        for generated_at, total_findings, ungrounded_count, total_citations, unfaithful_count in reversed(rows)
+    ]
+
+
 @app.get("/eval/reports")
 async def list_eval_reports(
     request: Request, run_id: str | None = None, limit: int = 100
@@ -603,6 +755,30 @@ async def clear_eval_reports(request: Request) -> dict[str, object]:
         result = await session.execute(
             select(EvalReportRecord).where(EvalReportRecord.client_id == client_id)
         )
+        records = result.scalars().all()
+        for record in records:
+            await session.delete(record)
+        await session.commit()
+
+    return {"deleted": len(records)}
+
+
+@app.delete("/eval/reports/community")
+async def clear_community_eval_reports(request: Request) -> dict[str, object]:
+    """Wipe every visitor's eval reports, resetting the public "Community Average".
+
+    Gated by the ADMIN_SECRET env var via the X-Admin-Secret header. Returns 404
+    if ADMIN_SECRET is unset (endpoint disabled) or the header doesn't match —
+    the same response either way so the endpoint's existence isn't revealed.
+    """
+    assert _session_factory is not None
+
+    admin_secret = os.getenv("ADMIN_SECRET")
+    if not admin_secret or request.headers.get("x-admin-secret") != admin_secret:
+        raise HTTPException(404, "Not found")
+
+    async with _session_factory() as session:
+        result = await session.execute(select(EvalReportRecord))
         records = result.scalars().all()
         for record in records:
             await session.delete(record)

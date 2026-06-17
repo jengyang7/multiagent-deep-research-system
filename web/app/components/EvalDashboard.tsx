@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types (mirror api/main.py response shapes + eval/schema.py)
@@ -26,12 +26,6 @@ interface RunSummary {
   stats: RunStats | null;
 }
 
-interface ModelOption {
-  id: string;
-  label?: string;
-  description?: string;
-}
-
 interface GlobalSummary {
   runs_evaluated: number;
   pass_rate: number | null;
@@ -41,22 +35,33 @@ interface GlobalSummary {
   relevance_score: number | null;
 }
 
-interface EvalReportSummary {
+// Counts needed to derive grounding/faithfulness rate — shared by per-run
+// reports and the unscoped community trend points.
+interface RateCounts {
+  total_findings: number;
+  ungrounded_count: number;
+  total_citations: number;
+  unfaithful_count: number;
+}
+
+interface EvalReportSummary extends RateCounts {
   id: string;
   run_id: string;
   query: string;
   generated_at: string;
   passed: boolean;
-  total_findings: number;
-  ungrounded_count: number;
-  total_citations: number;
-  unfaithful_count: number;
   uncited_count: number;
   failure_reasons: string[];
   eval_model: string;
   eval_cost_usd: number;
   recall_score: number;
   relevance_score: number;
+}
+
+// One point on the public "Quality Over Time" trend — aggregated across all
+// visitors, with no query text or identifiers (see GET /eval/reports/community).
+interface CommunityTrendPoint extends RateCounts {
+  generated_at: string;
 }
 
 interface GroundingResult {
@@ -115,12 +120,12 @@ interface EvalReportDetail extends EvalReportSummary {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function groundingRate(r: EvalReportSummary): number | null {
+function groundingRate(r: RateCounts): number | null {
   if (r.total_findings === 0) return null;
   return ((r.total_findings - r.ungrounded_count) / r.total_findings) * 100;
 }
 
-function faithfulnessRate(r: EvalReportSummary): number | null {
+function faithfulnessRate(r: RateCounts): number | null {
   if (r.total_citations === 0) return null;
   return ((r.total_citations - r.unfaithful_count) / r.total_citations) * 100;
 }
@@ -134,6 +139,10 @@ function fmtDate(iso: string | null): string {
   return new Date(iso).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
+}
+
+function fmtShortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function fmtCost(v?: number): string {
@@ -177,23 +186,54 @@ function CrossIcon() {
 // Trend chart — lightweight inline SVG, no charting dependency
 // ---------------------------------------------------------------------------
 
-function TrendChart({
-  reports, selectedId, onSelect,
-}: {
-  reports: EvalReportSummary[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  if (reports.length === 0) {
+// Catmull-Rom to cubic-Bezier conversion (tension 1/6) — smooth curve through
+// a series of points, matching the look of typical analytics dashboards.
+function smoothLinePath(pts: { x: number; y: number }[]): string {
+  if (pts.length === 0) return '';
+  if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? i : i - 1];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+function TrendChart({ points }: { points: CommunityTrendPoint[] }) {
+  // Measure the actual rendered width so the viewBox matches it 1:1 — with
+  // preserveAspectRatio="none", a viewBox aspect ratio that doesn't match the
+  // rendered box stretches circles into ellipses and squashes/elongates text.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(720);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect.width;
+      if (w) setWidth(w);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  if (points.length === 0) {
     return (
-      <div className="flex items-center justify-center h-48 text-sm text-gray-400">
-        No eval runs yet — run an eval from the table below to see trends.
+      <div ref={containerRef} className="flex items-center justify-center h-48 text-sm text-gray-400">
+        No community eval data yet.
       </div>
     );
   }
 
-  const W = 720;
-  const H = 200;
+  const W = width;
+  const H = 192; // matches h-48
   const padL = 36;
   const padR = 12;
   const padT = 12;
@@ -201,80 +241,94 @@ function TrendChart({
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
 
-  const n = reports.length;
+  const n = points.length;
   const xFor = (i: number) => (n === 1 ? padL + innerW / 2 : padL + (i / (n - 1)) * innerW);
-  const yFor = (pct: number) => padT + innerH - (pct / 100) * innerH;
 
-  const groundingPts = reports.map((r, i) => ({ r, x: xFor(i), pct: groundingRate(r) }));
-  const faithPts = reports.map((r, i) => ({ r, x: xFor(i), pct: faithfulnessRate(r) }));
+  const groundingPts = points.map((p, i) => ({ x: xFor(i), pct: groundingRate(p) }));
+  const faithPts = points.map((p, i) => ({ x: xFor(i), pct: faithfulnessRate(p) }));
+
+  // Zoom the y-axis to the data's range (with padding) so small differences
+  // near 100% — the common case — are visible instead of a flat line pinned
+  // to the top of a fixed 0-100% scale.
+  const allPcts = [...groundingPts, ...faithPts]
+    .map(p => p.pct)
+    .filter((v): v is number => v !== null);
+  let yMin = 0;
+  let yMax = 100;
+  if (allPcts.length > 0) {
+    const dataMin = Math.min(...allPcts);
+    const dataMax = Math.max(...allPcts);
+    const pad = Math.max(dataMax - dataMin, 4) * 0.5;
+    yMin = Math.max(0, Math.floor((dataMin - pad) / 5) * 5);
+    yMax = Math.min(100, Math.ceil((dataMax + pad) / 5) * 5);
+    if (yMin === yMax) {
+      yMin = Math.max(0, yMin - 10);
+      yMax = Math.min(100, yMax + 10);
+    }
+  }
+  const yFor = (pct: number) => padT + innerH - ((pct - yMin) / (yMax - yMin)) * innerH;
 
   const linePath = (pts: { x: number; pct: number | null }[]) =>
-    pts
-      .filter(p => p.pct !== null)
-      .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${yFor(p.pct as number)}`)
-      .join(' ');
+    smoothLinePath(
+      pts.filter((p): p is { x: number; pct: number } => p.pct !== null)
+        .map(p => ({ x: p.x, y: yFor(p.pct) })),
+    );
+
+  const yTicks = [yMin, (yMin + yMax) / 2, yMax];
+  const xTickIdx = n === 1 ? [0] : n === 2 ? [0, 1] : [0, Math.floor((n - 1) / 2), n - 1];
 
   return (
-    <div>
+    <div ref={containerRef}>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-48" preserveAspectRatio="none">
-        {/* gridlines + y-axis labels at 0/50/100% */}
-        {[0, 50, 100].map(pct => (
+        {/* gridlines + y-axis labels, zoomed to the data range */}
+        {yTicks.map(pct => (
           <g key={pct}>
             <line x1={padL} y1={yFor(pct)} x2={W - padR} y2={yFor(pct)} stroke="#e5e7eb" strokeWidth={1} />
-            <text x={padL - 6} y={yFor(pct) + 3} textAnchor="end" fontSize="9" fill="#9ca3af">{pct}%</text>
+            <text x={padL - 6} y={yFor(pct) + 3} textAnchor="end" fontSize="9" fill="#9ca3af">{Math.round(pct)}%</text>
           </g>
         ))}
 
-        {/* grounding line (blue, solid) */}
+        {/* grounding line (blue, smoothed) */}
         <path d={linePath(groundingPts)} fill="none" stroke="#3b82f6" strokeWidth={2} />
-        {/* faithfulness line (emerald, dashed) — distinguishes the two lines when their values overlap */}
-        <path d={linePath(faithPts)} fill="none" stroke="#10b981" strokeWidth={2} strokeDasharray="5 4" />
+        {/* faithfulness line (amber, smoothed) */}
+        <path d={linePath(faithPts)} fill="none" stroke="#f59e0b" strokeWidth={2} />
 
-        {/* points (clickable) */}
-        {reports.map((r, i) => {
-          const gPct = groundingRate(r);
-          const fPct = faithfulnessRate(r);
-          const isSelected = r.id === selectedId;
+        {/* donut-style points */}
+        {points.map((p, i) => {
+          const gPct = groundingRate(p);
+          const fPct = faithfulnessRate(p);
           return (
-            <g key={r.id} className="cursor-pointer" onClick={() => onSelect(r.id)}>
-              {/* invisible wide hit-target */}
-              <rect x={xFor(i) - (innerW / Math.max(n - 1, 1)) / 2} y={padT} width={innerW / Math.max(n, 1)} height={innerH} fill="transparent" />
+            <g key={i}>
               {gPct !== null && (
-                <circle cx={xFor(i)} cy={yFor(gPct)} r={isSelected ? 4.5 : 3} fill="#3b82f6" stroke="#fff" strokeWidth={1}>
-                  <title>{`Grounding: ${gPct.toFixed(0)}%`}</title>
+                <circle cx={xFor(i)} cy={yFor(gPct)} r={4} fill="#fff" stroke="#3b82f6" strokeWidth={2}>
+                  <title>{`Grounding: ${gPct.toFixed(0)}% — ${fmtDate(p.generated_at)}`}</title>
                 </circle>
               )}
               {fPct !== null && (
-                <rect
-                  x={xFor(i) - (isSelected ? 4 : 2.6)}
-                  y={yFor(fPct) - (isSelected ? 4 : 2.6)}
-                  width={isSelected ? 8 : 5.2}
-                  height={isSelected ? 8 : 5.2}
-                  fill="#10b981"
-                  stroke="#fff"
-                  strokeWidth={1}
-                  transform={`rotate(45 ${xFor(i)} ${yFor(fPct)})`}
-                >
-                  <title>{`Faithfulness: ${fPct.toFixed(0)}%`}</title>
-                </rect>
-              )}
-              {isSelected && (
-                <line x1={xFor(i)} y1={padT} x2={xFor(i)} y2={padT + innerH} stroke="#9ca3af" strokeWidth={1} strokeDasharray="3 3" />
+                <circle cx={xFor(i)} cy={yFor(fPct)} r={4} fill="#fff" stroke="#f59e0b" strokeWidth={2}>
+                  <title>{`Faithfulness: ${fPct.toFixed(0)}% — ${fmtDate(p.generated_at)}`}</title>
+                </circle>
               )}
             </g>
           );
         })}
+
+        {/* x-axis date labels */}
+        {xTickIdx.map(i => (
+          <text key={i} x={xFor(i)} y={H - 6} textAnchor="middle" fontSize="9" fill="#9ca3af">
+            {fmtShortDate(points[i].generated_at)}
+          </text>
+        ))}
       </svg>
       <div className="flex items-center gap-4 mt-2 text-[11px] text-gray-500">
         <span className="flex items-center gap-1.5">
-          <svg width="14" height="8" className="flex-shrink-0"><line x1="0" y1="4" x2="14" y2="4" stroke="#3b82f6" strokeWidth="2" /></svg>
-          Grounding rate (●)
+          <svg width="10" height="10" className="flex-shrink-0"><circle cx="5" cy="5" r="3.5" fill="#fff" stroke="#3b82f6" strokeWidth="2" /></svg>
+          Grounding rate
         </span>
         <span className="flex items-center gap-1.5">
-          <svg width="14" height="8" className="flex-shrink-0"><line x1="0" y1="4" x2="14" y2="4" stroke="#10b981" strokeWidth="2" strokeDasharray="4 3" /></svg>
-          Faithfulness rate (◆)
+          <svg width="10" height="10" className="flex-shrink-0"><circle cx="5" cy="5" r="3.5" fill="#fff" stroke="#f59e0b" strokeWidth="2" /></svg>
+          Faithfulness rate
         </span>
-        <span className="ml-auto text-gray-400">{fmtDate(reports[0].generated_at)} → {fmtDate(reports[n - 1].generated_at)}</span>
       </div>
     </div>
   );
@@ -295,7 +349,7 @@ function DetailPanel({ detail, loading }: { detail: EvalReportDetail | null; loa
   if (!detail) {
     return (
       <div className="flex items-center justify-center h-32 text-sm text-gray-400">
-        Select a point on the chart or a row below to see grounding &amp; faithfulness detail.
+        Click &quot;View&quot; on a run below to see grounding &amp; faithfulness detail.
       </div>
     );
   }
@@ -424,6 +478,7 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [reports, setReports] = useState<EvalReportSummary[]>([]);
   const [globalSummary, setGlobalSummary] = useState<GlobalSummary | null>(null);
+  const [communityTrend, setCommunityTrend] = useState<CommunityTrendPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
   const [runningEvalFor, setRunningEvalFor] = useState<string | null>(null);
@@ -431,19 +486,30 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
   const [detail, setDetail] = useState<EvalReportDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [communityClearing, setCommunityClearing] = useState(false);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Custom confirmation modal (replaces window.confirm for destructive actions)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Model used to judge faithfulness/completeness/relevance for "Run Eval".
-  const [evalModelOptions, setEvalModelOptions] = useState<ModelOption[]>([
-    { id: 'gpt-5.4', label: 'GPT-5.4', description: 'Best for complex topics' },
-    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', description: 'Faster and cheaper' },
-  ]);
-  const [evalModel, setEvalModel] = useState('gpt-5.4-mini');
+  // Fixed (not user-selectable) so every eval — including ones aggregated into
+  // "Community Average" and the trend chart below — is judged consistently.
+  // Defaults to a different provider than the report's writer model (see
+  // engine/models.py EVAL_MODEL) so the judge isn't grading its own work.
+  const [evalModel, setEvalModel] = useState('claude-haiku-4-5');
 
   useEffect(() => {
     fetch(`${apiBase}/models`)
       .then(res => res.json())
-      .then((data: { default: string; options: ModelOption[] }) => {
-        if (data.options?.length) setEvalModelOptions(data.options);
+      .then((data: { defaults?: { eval?: string } }) => {
+        if (data.defaults?.eval) setEvalModel(data.defaults.eval);
       })
       .catch(() => { /* keep the hardcoded fallback */ });
   }, [apiBase]);
@@ -454,15 +520,17 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
     setLoading(true);
     setErrorMsg('');
     try {
-      const [runsRes, reportsRes, globalRes] = await Promise.all([
+      const [runsRes, reportsRes, globalRes, trendRes] = await Promise.all([
         fetch(`${apiBase}/runs?status=done`, { headers }),
         fetch(`${apiBase}/eval/reports`, { headers }),
         fetch(`${apiBase}/eval/summary`),
+        fetch(`${apiBase}/eval/reports/community`),
       ]);
-      if (!runsRes.ok || !reportsRes.ok || !globalRes.ok) throw new Error('Failed to load eval data');
+      if (!runsRes.ok || !reportsRes.ok || !globalRes.ok || !trendRes.ok) throw new Error('Failed to load eval data');
       setRuns(await runsRes.json());
       setReports(await reportsRes.json());
       setGlobalSummary(await globalRes.json());
+      setCommunityTrend(await trendRes.json());
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -481,12 +549,6 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
     }
     return map;
   }, [reports]);
-
-  // Chronological order for the trend chart (oldest -> newest).
-  const trendReports = useMemo(
-    () => [...reports].sort((a, b) => a.generated_at.localeCompare(b.generated_at)),
-    [reports],
-  );
 
   const summary = useMemo(() => {
     if (reports.length === 0) return null;
@@ -547,7 +609,6 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
   }
 
   async function clearAll() {
-    if (!window.confirm('Delete all eval history? This cannot be undone.')) return;
     setClearing(true);
     setErrorMsg('');
     try {
@@ -563,6 +624,78 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
     }
   }
 
+  function confirmClearAll() {
+    setConfirmDialog({
+      title: 'Clear my data?',
+      message: 'This deletes all of your eval history. This cannot be undone.',
+      confirmLabel: 'Clear my data',
+      onConfirm: clearAll,
+    });
+  }
+
+  async function deleteRun(runId: string) {
+    setDeletingRunId(runId);
+    setErrorMsg('');
+    try {
+      const res = await fetch(`${apiBase}/runs/${runId}`, { method: 'DELETE', headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (selectedReportId && latestByRun.get(runId)?.id === selectedReportId) {
+        setSelectedReportId(null);
+        setDetail(null);
+      }
+      await load();
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setDeletingRunId(null);
+    }
+  }
+
+  function confirmDeleteRun(runId: string) {
+    setConfirmDialog({
+      title: 'Delete this research run?',
+      message: 'This also removes its eval history. This cannot be undone.',
+      confirmLabel: 'Delete',
+      onConfirm: () => deleteRun(runId),
+    });
+  }
+
+  // Secret long-press on "Community Average" — prompts for the admin secret and
+  // wipes every visitor's eval reports via DELETE /eval/reports/community.
+  async function clearCommunityAverage() {
+    const secret = window.prompt('Admin secret to reset the community average:');
+    if (!secret) return;
+    setCommunityClearing(true);
+    setErrorMsg('');
+    try {
+      const res = await fetch(`${apiBase}/eval/reports/community`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Secret': secret },
+      });
+      if (!res.ok) throw new Error(res.status === 404 ? 'Invalid admin secret' : `HTTP ${res.status}`);
+      await load();
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setCommunityClearing(false);
+    }
+  }
+
+  function startLongPress() {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = setTimeout(() => {
+      longPressTimer.current = null;
+      clearCommunityAverage();
+    }, 1500);
+  }
+
+  function cancelLongPress() {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  }
+
   return (
     <div className="flex-1 overflow-y-auto">
     <div className="p-4 sm:p-6 space-y-6 max-w-5xl mx-auto w-full">
@@ -574,24 +707,12 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
-            Eval model:
-            <select
-              value={evalModel}
-              onChange={e => setEvalModel(e.target.value)}
-              className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-medium text-gray-700 bg-white focus:outline-none"
-            >
-              {evalModelOptions.map(o => (
-                <option key={o.id} value={o.id}>{o.label ?? o.id}</option>
-              ))}
-            </select>
-          </label>
           <button
-            onClick={clearAll}
+            onClick={confirmClearAll}
             disabled={clearing || reports.length === 0}
             className="text-xs font-semibold text-red-600 hover:text-red-700 disabled:opacity-40 transition-colors px-2.5 py-1.5 rounded-lg border border-red-200 hover:bg-red-50"
           >
-            {clearing ? 'Clearing…' : 'Clear All'}
+            {clearing ? 'Clearing…' : 'Clear My Data'}
           </button>
         </div>
       </div>
@@ -643,15 +764,25 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
             </div>
           </div>
 
-          {/* Community average — aggregated across all visitors, read-only */}
+          {/* Community average — aggregated across all visitors, read-only.
+              Long-press the label for the hidden admin reset. */}
           <div>
-            <p className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-2">
+            <p
+              className="text-[11px] uppercase tracking-wide text-gray-400 font-semibold mb-2 select-none"
+              onMouseDown={startLongPress}
+              onMouseUp={cancelLongPress}
+              onMouseLeave={cancelLongPress}
+              onTouchStart={startLongPress}
+              onTouchEnd={cancelLongPress}
+              title={communityClearing ? 'Resetting…' : undefined}
+            >
               Community Average
               <span className="normal-case text-gray-400 font-normal">
-                {' '}— across all visitors
+                {' '}— based on{' '}
                 {globalSummary && globalSummary.runs_evaluated > 0
-                  ? ` (${globalSummary.runs_evaluated.toLocaleString()} eval${globalSummary.runs_evaluated !== 1 ? 's' : ''})`
-                  : ''}
+                  ? `${globalSummary.runs_evaluated.toLocaleString()} report${globalSummary.runs_evaluated !== 1 ? 's' : ''}`
+                  : 'no reports yet'}
+                {communityClearing ? ' — resetting…' : ''}
               </span>
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -678,10 +809,13 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
             </div>
           </div>
 
-          {/* Trend chart */}
+          {/* Trend chart — community-wide, so everyone sees the same picture */}
           <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
-            <p className="text-sm font-semibold text-gray-900 mb-2">Quality Over Time</p>
-            <TrendChart reports={trendReports} selectedId={selectedReportId} onSelect={loadDetail} />
+            <p className="text-sm font-semibold text-gray-900 mb-2">
+              Quality Over Time
+              <span className="normal-case text-gray-400 font-normal text-xs"> — across all visitors</span>
+            </p>
+            <TrendChart points={communityTrend} />
           </div>
 
           {/* Runs table */}
@@ -728,22 +862,32 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
                             )}
                           </td>
                           <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                            {latest ? (
+                            <div className="flex items-center justify-end gap-3">
+                              {latest ? (
+                                <button
+                                  onClick={() => loadDetail(latest.id)}
+                                  className="text-xs font-semibold text-blue-600 hover:text-blue-800 transition-colors"
+                                >
+                                  View
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => runEval(run.id)}
+                                  disabled={isRunning}
+                                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-800 disabled:opacity-50 transition-colors"
+                                >
+                                  {isRunning && <Spinner />} {isRunning ? 'Running…' : 'Run Eval'}
+                                </button>
+                              )}
                               <button
-                                onClick={() => loadDetail(latest.id)}
-                                className="text-xs font-semibold text-blue-600 hover:text-blue-800 transition-colors"
+                                onClick={() => confirmDeleteRun(run.id)}
+                                disabled={deletingRunId === run.id}
+                                title="Delete this research run"
+                                className="text-xs font-semibold text-gray-400 hover:text-red-600 disabled:opacity-50 transition-colors"
                               >
-                                View
+                                {deletingRunId === run.id ? '…' : 'Delete'}
                               </button>
-                            ) : (
-                              <button
-                                onClick={() => runEval(run.id)}
-                                disabled={isRunning}
-                                className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-800 disabled:opacity-50 transition-colors"
-                              >
-                                {isRunning && <Spinner />} {isRunning ? 'Running…' : 'Run Eval'}
-                              </button>
-                            )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -760,6 +904,36 @@ export default function EvalDashboard({ apiBase, clientId }: { apiBase: string; 
             <DetailPanel detail={detail} loading={detailLoading} />
           </div>
         </>
+      )}
+
+      {/* Custom confirmation modal — replaces window.confirm for destructive actions */}
+      {confirmDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+          onClick={() => setConfirmDialog(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <p className="text-base font-semibold text-gray-900">{confirmDialog.title}</p>
+            <p className="text-sm text-gray-500 mt-1.5">{confirmDialog.message}</p>
+            <div className="flex justify-end gap-2 mt-5">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="text-sm font-medium text-gray-600 hover:text-gray-800 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }}
+                className="text-sm font-semibold text-white bg-red-600 hover:bg-red-700 px-3.5 py-1.5 rounded-lg transition-colors"
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
     </div>

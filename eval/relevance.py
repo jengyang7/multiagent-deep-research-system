@@ -6,10 +6,9 @@ directly the report responds to the query on a 1-5 scale, with reasoning.
 from __future__ import annotations
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model, structured_output_kwargs
 from engine.state import TokenUsage
 from engine.usage import usage_from_message
 from eval.report_parsing import split_body_and_references
@@ -47,11 +46,12 @@ async def run_relevance_check(
     """Score how relevant `report` is to `query`."""
     body, _ = split_body_and_references(report)
 
-    judge_llm = ChatOpenAI(model=lead_model, temperature=0)
+    judge_llm = make_chat_model(lead_model, temperature=0)
     chain = _RELEVANCE_PROMPT | judge_llm.with_structured_output(
-        _RelevanceVerdict, method="function_calling", include_raw=True
+        _RelevanceVerdict, **structured_output_kwargs(lead_model), include_raw=True
     )
     raw = await chain.ainvoke({"query": query, "report_body": body})
+    assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
     verdict: _RelevanceVerdict = raw["parsed"]
     usage = usage_from_message(raw["raw"], "relevance", lead_model)
 

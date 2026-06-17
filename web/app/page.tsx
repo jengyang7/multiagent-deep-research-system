@@ -8,7 +8,7 @@ import EvalDashboard from './components/EvalDashboard';
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
 type Phase = 'idle' | 'querying' | 'clarifying' | 'researching' | 'done' | 'error';
-type LogType = 'start' | 'plan' | 'subtask' | 'synthesis' | 'report' | 'complete' | 'clarify' | 'error';
+type LogType = 'start' | 'plan' | 'subtask' | 'debate' | 'synthesis' | 'report' | 'complete' | 'clarify' | 'error';
 type LibrarySource    = { run_id: string; title: string; query: string };
 type LibraryStepType  = 'searching' | 'chunks_retrieved' | 'generating' | 'done' | 'error';
 interface LibraryStep  { id: number; type: LibraryStepType; label: string; detail?: string; ts: string; }
@@ -19,6 +19,11 @@ interface ChatMessage  { role: 'user' | 'assistant'; content: string; }
 interface LibraryChatMessage { role: 'user' | 'assistant'; content: string; sources?: LibrarySource[]; }
 interface LogEntry     { id: number; type: LogType; label: string; detail?: string; ts: string; createdAt: number; serverTs?: number; }
 interface ModelOption  { id: string; label: string; description: string; }
+interface DebateTurn   { agent: 'advocate' | 'skeptic'; model: string; round: number; content: string; }
+// One judged category in the debate verdict table
+interface VerdictRow  { category: string; assessment: string; winner: 'proposition' | 'opposition' | 'draw'; }
+// The neutral lead model's judgment of the finished debate
+interface DebateVerdict { rows: VerdictRow[]; winner: 'proposition' | 'opposition' | 'draw'; model: string; }
 
 interface UsageStats {
   leadModel: string;
@@ -45,11 +50,29 @@ interface HistoryEntry {
   showReport: boolean;
   chatMessages: ChatMessage[];
   usageStats: UsageStats | null;
+  debateTurns?: DebateTurn[];
+  // Second research round: gap questions distilled from the debate
+  gapSubtasks?: SubtaskState[];
+  // Whether this run was started in debate mode (drives milestones/progress)
+  debateRun?: boolean;
+  debateVerdict?: DebateVerdict | null;
 }
 
 const HISTORY_KEY = 'dra_history_v1';
 const ACTIVE_ID_KEY = 'dra_active_id_v1';
 const CLIENT_ID_KEY = 'dra_client_id_v1';
+
+// Clickable starter queries on the New Research page — click to research immediately
+const SUGGESTED_QUERIES = [
+  'Should governments regulate frontier AI models?',
+  'Will AI replace more software engineers than it creates by 2030?',
+  // 'Can LLM-based sentiment analysis consistently outperform traditional financial indicators?',
+  // 'Should companies adopt AI agents instead of SaaS workflows?',
+  'Is open-source AI more beneficial to society than proprietary AI?',
+  'Will AGI arrive before 2030?',
+  'Is a Computer Science degree still worth it in the AI era?',
+  // 'Can solo founders build billion-dollar companies using AI?',
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -116,6 +139,16 @@ function SendIcon({ className = 'w-4 h-4' }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
+    </svg>
+  );
+}
+
+function InfoIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 16v-4M12 8h.01" />
     </svg>
   );
 }
@@ -196,6 +229,7 @@ function StepIconCircle({ type }: { type: LogType }) {
     start:    { bg: 'bg-blue-100',   color: 'text-blue-600',   d: 'M21 21l-4.35-4.35M17 11A6 6 0 111 11a6 6 0 0116 0z' },
     plan:     { bg: 'bg-purple-100', color: 'text-purple-600', d: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
     subtask:  { bg: 'bg-green-100',  color: 'text-green-600',  d: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
+    debate:   { bg: 'bg-rose-100',   color: 'text-rose-600',   d: 'M12 3v18M7 6.5L4 13a3 3 0 006 0L7 6.5zm10 0L14 13a3 3 0 006 0l-3-6.5zM5 6.5h14' },
     synthesis:{ bg: 'bg-orange-100', color: 'text-orange-600', d: 'M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z' },
     report:   { bg: 'bg-indigo-100', color: 'text-indigo-600', d: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
     complete: { bg: 'bg-emerald-100',color: 'text-emerald-600',d: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
@@ -208,6 +242,150 @@ function StepIconCircle({ type }: { type: LogType }) {
       <svg className={`w-4 h-4 ${c.color}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <path strokeLinecap="round" strokeLinejoin="round" d={c.d} />
       </svg>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Research question cards — used for both the initial plan and the follow-up
+// (gap) round. Collapsible like the debate panel so finished rounds stay
+// re-openable after the report; cards keep full size while any question is
+// still being researched, then all shrink together once the round finishes.
+// ---------------------------------------------------------------------------
+
+function SubtaskCards({
+  heading, icon, subtasks, expanded, onToggle,
+}: {
+  heading: string;
+  icon: string;
+  subtasks: SubtaskState[];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const allDone = subtasks.length > 0 && subtasks.every(s => s.status === 'done');
+  const totalFindings = subtasks.reduce((n, s) => n + s.findingsCount, 0);
+  return (
+    <div className="px-4 sm:px-6 lg:px-8 pt-4">
+      <div className="border border-gray-200 rounded-2xl overflow-hidden">
+        <button
+          onClick={onToggle}
+          className="w-full bg-gray-50 px-5 py-3 flex items-center gap-2 text-left focus:outline-none"
+        >
+          <span className="text-base">{icon}</span>
+          <span className="text-sm font-semibold text-gray-800">
+            {heading} ({subtasks.length} question{subtasks.length !== 1 ? 's' : ''})
+          </span>
+          {allDone && totalFindings > 0 && (
+            <span className="text-[11px] text-emerald-600 font-medium bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">
+              {totalFindings} finding{totalFindings !== 1 ? 's' : ''}
+            </span>
+          )}
+          <svg
+            className={`w-4 h-4 text-gray-400 ml-auto flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`}
+            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+        {expanded && (
+          <div className="px-3 sm:px-4 py-4 space-y-2">
+            {subtasks.map((s, i) => (
+              <div
+                key={i}
+                className={`flex items-start gap-3 rounded-xl border transition-all ${
+                  s.status === 'done' ? 'bg-emerald-50 border-emerald-200' : 'bg-gray-50 border-gray-200'
+                } ${allDone ? 'px-3 py-2' : 'px-4 py-3'}`}
+              >
+                {s.status === 'done'
+                  ? <span className="mt-1.5 w-2 h-2 rounded-full flex-shrink-0 bg-emerald-500" />
+                  : <span className="mt-0.5 flex-shrink-0"><Spinner /></span>
+                }
+                <span className={`flex-1 leading-relaxed ${
+                  s.status === 'done' ? 'text-emerald-800' : 'text-gray-600'
+                } ${allDone ? 'text-xs' : 'text-sm'}`}>
+                  <span className={`font-mono font-semibold mr-1.5 ${
+                    s.status === 'done' ? 'text-emerald-500' : 'text-gray-400'
+                  }`}>
+                    Subagent {i + 1}:
+                  </span>
+                  {s.question.charAt(0).toUpperCase() + s.question.slice(1)}
+                </span>
+                {s.status === 'done' && (
+                  <span className="text-[11px] text-emerald-600 font-medium whitespace-nowrap">
+                    {s.findingsCount} finding{s.findingsCount !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Debate chat bubble — proposition speaks from the left, opposition from the
+// right, like two AIs in a group chat. `streaming` renders the in-flight turn
+// with a cursor.
+// ---------------------------------------------------------------------------
+
+// Display label for a verdict-table winner cell ("proposition" | "opposition" | "draw")
+function verdictWinnerLabel(winner: VerdictRow['winner']) {
+  return winner === 'draw' ? 'Draw' : winner === 'proposition' ? 'Proposition' : 'Opposition';
+}
+
+function DebateBubble({
+  agent, round, modelLabel, content, streaming = false, thinking = false,
+}: {
+  agent: DebateTurn['agent'];
+  round: number;
+  modelLabel: string;
+  content: string;
+  streaming?: boolean;
+  thinking?: boolean;
+}) {
+  const isSkeptic = agent === 'skeptic';
+  return (
+    <div className={`flex items-start gap-2 ${isSkeptic ? 'flex-row-reverse' : ''}`}>
+      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${
+        isSkeptic ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'
+      }`}>
+        {isSkeptic ? 'O' : 'P'}
+      </div>
+      <div className={`max-w-[88%] sm:max-w-[80%] rounded-2xl border px-4 py-3 ${
+        isSkeptic
+          ? 'bg-amber-50 border-amber-100 rounded-br-md'
+          : 'bg-blue-50 border-blue-100 rounded-bl-md'
+      }`}>
+        <div className={`flex items-baseline gap-2 mb-1.5 ${isSkeptic ? 'justify-end' : ''}`}>
+          <span className={`text-[11px] font-semibold ${isSkeptic ? 'text-amber-700' : 'text-blue-700'}`}>
+            {isSkeptic ? 'Opposition' : 'Proposition'}
+          </span>
+          <span className="text-[11px] text-gray-400">
+            {thinking
+              ? `${modelLabel} · thinking…`
+              : `Round ${round} · ${modelLabel}${streaming ? ' · typing…' : ''}`}
+          </span>
+        </div>
+        {thinking ? (
+          <div className="flex items-center gap-1 py-0.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce [animation-delay:-0.3s]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce [animation-delay:-0.15s]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" />
+          </div>
+        ) : (
+          <div className="text-sm text-gray-700 leading-relaxed [&_p]:mb-2 [&_p:last-child]:mb-0
+            [&_strong]:font-semibold [&_strong]:text-gray-900
+            [&_a]:text-blue-600 [&_a:hover]:underline [&_a]:break-words
+            [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:mb-2">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            {streaming && (
+              <span className="inline-block w-1.5 h-3.5 bg-gray-400 animate-pulse rounded-sm" />
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -270,8 +448,14 @@ function Sidebar({
       >
       {/* Brand */}
       <div className="px-5 py-5 border-b border-gray-200 flex items-center justify-between">
-        <h1 className="text-[18px] font-extrabold text-gray-900 tracking-tight leading-tight">
-          Deep Research Agent
+        <h1 className="text-[20px] font-extrabold text-gray-900 tracking-tight leading-tight">
+          MindClash
+          <span className="block text-[12px] font-bold text-gray-400 tracking-normal mt-2">
+            Multi-agent deep research with
+            <br />
+            debate system
+          </span>
+     
         </h1>
         <button
           onClick={onClose}
@@ -356,7 +540,7 @@ function Sidebar({
                     : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
                 } ${locked && !isActive ? 'opacity-50' : ''}`}
               >
-                <HistoryItemIcon />
+                {/* <HistoryItemIcon /> */}
                 <span className="flex-1 truncate">{entry.title || entry.query || 'Untitled research'}</span>
                 {isLive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />}
                 <button
@@ -437,15 +621,110 @@ export default function Home() {
   ]);
   const [selectedModel, setSelectedModel] = useState('gpt-5.4');
 
+  // Debate mode: two cross-provider agents argue over the findings pre-synthesis
+  const [debateMode,     setDebateMode]     = useState(false);
+  const [debateInfoOpen, setDebateInfoOpen] = useState(false);
+  const debateInfoRef = useRef<HTMLDivElement>(null);
+  const [advocateModel,  setAdvocateModel]  = useState('gpt-5.4');
+  const [skepticModel,   setSkepticModel]   = useState('gpt-5.4');
+  const [debateTurns,    setDebateTurns]    = useState<DebateTurn[]>([]);
+  const [debateExpanded, setDebateExpanded] = useState(true);
+  const [debatingActive, setDebatingActive] = useState(false);
+  // In-flight debate turn, accumulated token-by-token from debate_token events;
+  // replaced by the final debate_turn event when the speaker finishes.
+  const [debateStreaming, setDebateStreaming] = useState<{ agent: DebateTurn['agent']; content: string } | null>(null);
+  // Whether the *active* run was started in debate mode — drives the milestone
+  // labels and progress weighting (the debateMode toggle is just the form input)
+  const [debateRun,      setDebateRun]      = useState(false);
+  // Judge phase: the neutral lead weighs both sides after the final round
+  const [judgingActive,  setJudgingActive]  = useState(false);
+  const [debateVerdict,  setDebateVerdict]  = useState<DebateVerdict | null>(null);
+  // Verdict card is collapsible — expanded while live, auto-collapsed once the
+  // final report is ready so the report takes center stage (still re-openable)
+  const [verdictExpanded, setVerdictExpanded] = useState(true);
+
+  // Debate-driven gap research (second finding round, debate mode only)
+  const [gapSubtasks,       setGapSubtasks]       = useState<SubtaskState[]>([]);
+  const [gapPlanningActive, setGapPlanningActive] = useState(false);
+
+  // Collapsible question-card rounds (like the debate panel): open while their
+  // round is live, auto-collapsed when the report takes the stage
+  const [planCardsExpanded, setPlanCardsExpanded] = useState(true);
+  const [gapCardsExpanded,  setGapCardsExpanded]  = useState(true);
+
+  // DOCX export in flight (the docx lib is dynamically imported + packs async)
+  const [docxBusy, setDocxBusy] = useState(false);
+
+  // Per-round question counters (refs: handleEvent runs outside React renders,
+  // so state would be stale). When a round's last question completes we log a
+  // "Compacting Findings" step, so "Research Execution" stops reading as running
+  // while every question card already shows done.
+  const stageProgress = useRef({ plan: { total: 0, done: 0 }, gap: { total: 0, done: 0 } });
+
+  // Mirrors of subtasks/gapSubtasks for handleEvent (same staleness issue as
+  // stageProgress above) — lets subtask_done look up "Subagent N" by question.
+  const subtasksRef = useRef<SubtaskState[]>([]);
+  const gapSubtasksRef = useRef<SubtaskState[]>([]);
+
   // Anonymous per-visitor id (no login) — scopes /runs and /eval/reports so
   // visitors only see their own data. Generated once and persisted locally.
   const [clientId, setClientId] = useState('');
 
-  const logEndRef  = useRef<HTMLDivElement>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const logEndRef    = useRef<HTMLDivElement>(null);
+  const chatEndRef   = useRef<HTMLDivElement>(null);
+  const debateEndRef = useRef<HTMLDivElement>(null);
+  const centerRef    = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [log]);
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
+  // Follow new steps only while a run is live — opening a finished session from
+  // history must show it from the top, not auto-scrolled to the bottom.
+  useEffect(() => {
+    if (phase === 'researching' || phase === 'querying' || phase === 'clarifying') {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [log, phase]);
+  // Same idea for chat: only follow messages the user is actively streaming
+  useEffect(() => {
+    if (chatStreaming) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, chatStreaming]);
+
+  // Switching sessions (or pages) lands at the top of the restored session
+  useEffect(() => { centerRef.current?.scrollTo({ top: 0 }); }, [activeId, view]);
+
+  // Close the "what is debate mode" popover on outside click
+  useEffect(() => {
+    if (!debateInfoOpen) return;
+    function onClick(e: MouseEvent) {
+      if (debateInfoRef.current && !debateInfoRef.current.contains(e.target as Node)) {
+        setDebateInfoOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [debateInfoOpen]);
+
+  // Follow the live debate: keep the newest bubble (or the streaming one) in
+  // view while turns arrive. Only during the run — never when a finished
+  // debate is re-opened later.
+  useEffect(() => {
+    if (phase === 'researching' && (debatingActive || debateStreaming)) {
+      debateEndRef.current?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [phase, debatingActive, debateStreaming, debateTurns]);
+
+  // Auto-hide the verdict card once the final report is ready, so the report
+  // takes center stage. Still re-openable via the card's header toggle.
+  useEffect(() => {
+    if (report) setVerdictExpanded(false);
+  }, [report]);
+
+  // 1s tick while researching — drives the live elapsed time on the last
+  // thinking step so it never sits on a static "Running…"
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (phase !== 'researching') return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
 
   // Load a history entry's saved state into the active session view
   function restoreEntry(entry: HistoryEntry) {
@@ -462,6 +741,14 @@ export default function Home() {
     setSupervisorThinking(''); setSupervisorThinkingExpanded(false);
     setSynthesizingActive(false); setCopied(false);
     setUsageStats(entry.usageStats);
+    setDebateTurns(entry.debateTurns ?? []);  // old localStorage entries lack this
+    setGapSubtasks(entry.gapSubtasks ?? []);
+    setDebatingActive(false); setDebateExpanded(false); setDebateStreaming(null);
+    setGapPlanningActive(false); setJudgingActive(false);
+    setDebateRun(entry.debateRun ?? (entry.debateTurns?.length ?? 0) > 0);
+    setDebateVerdict(entry.debateVerdict ?? null);
+    setPlanCardsExpanded(false); setGapCardsExpanded(false);
+    maxProgress.current = 0;
     setError(''); setClarifyQuestions([]); setClarifyOptions([]); setClarifyAnswers([]);
     // Transient phases can't be resumed after a refresh/switch — reset them
     const transient: Phase[] = ['researching', 'querying', 'clarifying'];
@@ -478,9 +765,16 @@ export default function Home() {
   useEffect(() => {
     fetch(`${API}/models`)
       .then(res => res.json())
-      .then((data: { default: string; options: ModelOption[] }) => {
+      .then((data: {
+        default: string;
+        defaults?: { lead: string; advocate: string; skeptic: string };
+        options: ModelOption[];
+      }) => {
         if (data.options?.length) setModelOptions(data.options);
         if (data.default) setSelectedModel(data.default);
+        // Per-role debate defaults — cross-provider when the keys are configured
+        if (data.defaults?.advocate) setAdvocateModel(data.defaults.advocate);
+        if (data.defaults?.skeptic) setSkepticModel(data.defaults.skeptic);
       })
       .catch(() => { /* keep the hardcoded fallback */ });
   }, []);
@@ -531,19 +825,73 @@ export default function Home() {
   useEffect(() => {
     if (!activeId) return;
     setHistory(prev => prev.map(h => h.id === activeId
-      ? { ...h, query, title, runId, phase, subtasks, sources, log, report, showReport, chatMessages, usageStats }
+      ? { ...h, query, title, runId, phase, subtasks, sources, log, report, showReport, chatMessages, usageStats, debateTurns, gapSubtasks, debateRun, debateVerdict }
       : h));
-  }, [activeId, phase, query, title, runId, subtasks, sources, log, report, showReport, chatMessages, usageStats]);
+  }, [activeId, phase, query, title, runId, subtasks, sources, log, report, showReport, chatMessages, usageStats, debateTurns, gapSubtasks, debateRun, debateVerdict]);
 
-  // Progress — starts at 3 (tiny pulse), never 100 until report revealed, never goes backward
+  // ---------------------------------------------------------------------------
+  // Progress + milestones. Stage budgets differ per mode so the first research
+  // round can't push the bar to ~90% when a debate + second round still follow:
+  //   plain run:  plan 0–10 · research 10–72 · synthesis 80 · report 95 · reveal 100
+  //   debate run: plan 0–8 · research 8–36 · debate 38–58 · verdict 60 ·
+  //               gap plan 62 · gap research 64–84 · synthesis 88 · report 95
+  // ---------------------------------------------------------------------------
+
+  // Matches the backend DEFAULT_DEBATE_ROUNDS (2 rounds × 2 speakers)
+  const EXPECTED_DEBATE_TURNS = 4;
+
+  // Monotonic clamp: stage flags can flip off between SSE events (e.g. between
+  // compaction and the next stage), and the bar must never move backward.
+  const maxProgress = useRef(0);
+
   const progressPct = (() => {
-    if (showReport) return 100;
-    if (report) return 95;
-    if (synthesizingActive) return 92;
-    if (subtasks.length === 0) return phase === 'researching' ? 3 : 0; // 3% = tiny visible sliver
-    const sub = Math.round(subtasks.filter(s => s.status === 'done').length / subtasks.length * 75);
-    return 15 + sub; // 15% when plan arrives → up to 90% — always > 3%, never backward
+    const raw = (() => {
+      if (showReport) return 100;
+      if (report) return 95;
+      const doneFrac = (round: SubtaskState[]) =>
+        round.length === 0 ? 0 : round.filter(s => s.status === 'done').length / round.length;
+      if (debateRun) {
+        if (synthesizingActive) return 88;
+        if (gapSubtasks.length > 0) return 64 + Math.round(doneFrac(gapSubtasks) * 20);
+        if (gapPlanningActive) return 62;
+        if (judgingActive || debateVerdict) return 60;
+        const turns = Math.min(debateTurns.length + (debateStreaming ? 0.5 : 0), EXPECTED_DEBATE_TURNS);
+        if (turns > 0 || debatingActive) return 38 + Math.round((turns / EXPECTED_DEBATE_TURNS) * 20);
+        if (subtasks.length > 0) return 8 + Math.round(doneFrac(subtasks) * 28);
+        return phase === 'researching' ? 3 : 0; // 3% = tiny visible sliver
+      }
+      if (synthesizingActive) return 80;
+      if (subtasks.length > 0) return 10 + Math.round(doneFrac(subtasks) * 62);
+      return phase === 'researching' ? 3 : 0;
+    })();
+    return Math.max(raw, maxProgress.current);
   })();
+  maxProgress.current = progressPct >= 100 ? 0 : progressPct;
+
+  // Milestone trail shown beside the progress bar — debate runs surface the
+  // extra debate / follow-up research stages
+  const milestones = debateRun
+    ? ['Planning', 'Initial Research', 'Debate', 'Gap Research', 'Synthesizing', 'Report']
+    : ['Planning', 'Research', 'Synthesizing', 'Report'];
+  const milestoneIdx = (() => {
+    if (report) return milestones.length - 1;
+    if (synthesizingActive) return milestones.length - 2;
+    if (debateRun) {
+      if (gapPlanningActive || gapSubtasks.length > 0) return 3;
+      if (debatingActive || judgingActive || debateStreaming || debateTurns.length > 0) return 2;
+    }
+    if (subtasks.length > 0) return 1;
+    return 0;
+  })();
+
+  // Reflect the current step + progress in the browser tab title while a run
+  // is in flight, so progress is visible even when this tab isn't focused.
+  useEffect(() => {
+    const currentStep = log.length > 0 ? log[log.length - 1].label : milestones[milestoneIdx];
+    document.title = phase === 'researching'
+      ? `${progressPct}% · ${currentStep} — MindClash`
+      : 'MindClash';
+  }, [phase, progressPct, milestones, milestoneIdx, log]);
 
   const displayQuery = title || (query ? query.charAt(0).toUpperCase() + query.slice(1) : '');
 
@@ -577,18 +925,96 @@ export default function Home() {
     } else if (type === 'plan') {
       setPhase(p => (p === 'querying' ? 'researching' : p));
       const qs = (data.subtasks as string[]) ?? [];
-      setSubtasks(qs.map(q => ({ question: q, status: 'pending', findingsCount: 0 })));
+      const newSubtasks: SubtaskState[] = qs.map(q => ({ question: q, status: 'pending', findingsCount: 0 }));
+      setSubtasks(newSubtasks);
+      subtasksRef.current = newSubtasks;
+      stageProgress.current.plan = { total: qs.length, done: 0 };
       const planTitle = data.title as string | undefined;
       if (planTitle) setTitle(planTitle);
     } else if (type === 'subtask_done') {
       const q     = data.question as string;
       const count = (data.findings_count as number) ?? 0;
       const srcs  = (data.sources as string[]) ?? [];
-      setSubtasks(prev => prev.map(s => s.question === q ? { ...s, status: 'done', findingsCount: count } : s));
+      const stage = data.stage === 'gap' ? 'gap' : 'plan';
+      const markDone = (s: SubtaskState) => s.question === q ? { ...s, status: 'done' as const, findingsCount: count } : s;
+      const list = stage === 'gap' ? gapSubtasksRef.current : subtasksRef.current;
+      const idx = list.findIndex(s => s.question === q);
+      if (stage === 'gap') setGapSubtasks(prev => prev.map(markDone));
+      else setSubtasks(prev => prev.map(markDone));
       setSources(prev => { const set = new Set(prev); srcs.forEach(s => set.add(s)); return [...set]; });
-      addLog('subtask', 'Research Execution', `${count} finding${count !== 1 ? 's' : ''} · ${q.slice(0, 80)}${q.length > 80 ? '…' : ''}`, serverTs);
+      const subagentLabel = `${stage === 'gap' ? 'Gap Subagent' : 'Subagent'} ${idx + 1}`;
+      const label = stage === 'gap' ? 'Follow-up Research' : 'Research';
+      addLog('subtask', `${label} — ${subagentLabel}`, `${count} finding${count !== 1 ? 's' : ''} · ${q.slice(0, 80)}${q.length > 80 ? '…' : ''}`, serverTs);
+      // Last question of the round done → compaction starts immediately, so log
+      // it now: the execution step resolves the moment every card shows done.
+      const sp = stageProgress.current[stage];
+      sp.done += 1;
+      if (sp.total > 0 && sp.done >= sp.total) {
+        addLog('synthesis', 'Compacting Findings', 'All questions answered — merging findings into a compact research summary', serverTs);
+      }
+    } else if (type === 'debating') {
+      setDebatingActive(true);
+      setDebateExpanded(true);
+      setPlanCardsExpanded(false); // debate takes the stage — questions stay openable
+      addLog('debate', 'Adversarial Debate', 'Agents are arguing opposing positions over the findings…', serverTs);
+    } else if (type === 'debate_token') {
+      const agent = data.agent as DebateTurn['agent'];
+      const token = data.content as string;
+      setDebateStreaming(prev =>
+        prev && prev.agent === agent ? { agent, content: prev.content + token } : { agent, content: token }
+      );
+    } else if (type === 'debate_turn') {
+      const turn: DebateTurn = {
+        agent: data.agent as DebateTurn['agent'],
+        model: data.model as string,
+        round: data.round as number,
+        content: data.content as string,
+      };
+      setDebateStreaming(null);
+      setDebateTurns(prev => [...prev, turn]);
+      const label = turn.agent === 'advocate' ? 'Proposition' : 'Opposition';
+      addLog('debate', `Debate — ${label} (round ${turn.round})`, turn.content.slice(0, 160) + (turn.content.length > 160 ? '…' : ''), serverTs);
+    } else if (type === 'judging') {
+      setDebatingActive(false);
+      setJudgingActive(true);
+      setDebateExpanded(false); // debate is over — collapse it so the verdict card takes the stage
+      addLog('debate', 'Judging the Debate', 'A neutral judge (the lead model) is weighing both sides to declare a winner', serverTs);
+    } else if (type === 'debate_verdict') {
+      const winner = data.winner as DebateVerdict['winner'];
+      const rows = data.rows as VerdictRow[];
+      setJudgingActive(false);
+      setVerdictExpanded(true);
+      setDebateVerdict({ winner, rows, model: data.model as string });
+      const label = winner === 'draw' ? 'Draw' : `${verdictWinnerLabel(winner)} wins`;
+      const detail = rows.map(r => `${r.category}: ${r.assessment}`).join(' ');
+      addLog('debate', `Debate Verdict — ${label}`, detail.slice(0, 160) + (detail.length > 160 ? '…' : ''), serverTs);
+    } else if (type === 'gap_planning') {
+      setDebatingActive(false);
+      setJudgingActive(false);
+      setGapPlanningActive(true);
+      addLog('plan', 'Identifying Evidence Gaps', 'Distilling unresolved objections from the debate into follow-up research questions', serverTs);
+    } else if (type === 'gap_plan') {
+      const qs = (data.subtasks as string[]) ?? [];
+      const newGapSubtasks: SubtaskState[] = qs.map(q => ({ question: q, status: 'pending', findingsCount: 0 }));
+      setGapPlanningActive(false);
+      setDebateExpanded(false); // debate is over — focus moves to the second finding round
+      setVerdictExpanded(false); // follow-up research is starting — verdict card steps aside
+      setGapSubtasks(newGapSubtasks);
+      gapSubtasksRef.current = newGapSubtasks;
+      setGapCardsExpanded(true);
+      stageProgress.current.gap = { total: qs.length, done: 0 };
+      addLog('plan', 'Follow-up Research Plan', `${qs.length} gap question${qs.length !== 1 ? 's' : ''} from the debate`, serverTs);
     } else if (type === 'synthesizing') {
+      setDebatingActive(false);
+      setJudgingActive(false);
+      setGapPlanningActive(false);
       setSynthesizingActive(true);
+      // Synthesis is the last step before the report — every earlier step
+      // (planning, research, debate, judging, gap research) is now complete.
+      setPlanCardsExpanded(false);
+      setDebateExpanded(false);
+      setVerdictExpanded(false);
+      setGapCardsExpanded(false);
       addLog('synthesis', 'Synthesizing Findings', undefined, serverTs);
     } else if (type === 'clarification_needed') {
       const qs = (data.questions as string[]) ?? [];
@@ -603,12 +1029,17 @@ export default function Home() {
       setSynthesizingActive(false);
       setReport(data.content as string);
       setShowReport(true);
+      // Report takes the stage — debate + question rounds stay openable above it
+      setDebateExpanded(false);
+      setPlanCardsExpanded(false);
+      setGapCardsExpanded(false);
       addLog('report', 'Final Report', undefined, serverTs);
     } else if (type === 'done') {
       const endTs = serverTs ?? Date.now();
       setPhase('done');
       setResearchEndTime(endTs);
       setSubtasks(prev => prev.map(s => s.status === 'pending' ? { ...s, status: 'done' } : s));
+      setGapSubtasks(prev => prev.map(s => s.status === 'pending' ? { ...s, status: 'done' } : s));
       const u = data.usage as Record<string, unknown> | undefined;
       if (u) {
         setUsageStats({
@@ -626,6 +1057,7 @@ export default function Home() {
     } else if (type === 'error') {
       setError(data.message as string);
       setPhase('error');
+      setResearchEndTime(serverTs ?? Date.now());
       addLog('error', 'Error', data.message as string, serverTs);
     }
   }
@@ -634,15 +1066,22 @@ export default function Home() {
   // Actions
   // -------------------------------------------------------------------------
 
-  async function startResearch() {
-    if (!query.trim()) return;
-    const trimmed = query.trim();
+  async function startResearch(presetQuery?: string) {
+    const trimmed = (presetQuery ?? query).trim();
+    if (!trimmed) return;
+    setQuery(trimmed);
     setPhase('querying');
     setTitle('');
     setSubtasks([]); setSources([]); setReport(''); setShowReport(false);
     setError(''); setChatMessages([]); setRunId('');
     setSupervisorThinking(''); setSupervisorThinkingExpanded(false);
     setSynthesizingActive(false); setResearchEndTime(null); setUsageStats(null);
+    setDebateTurns([]); setDebatingActive(false); setDebateExpanded(true); setDebateStreaming(null);
+    setDebateRun(debateMode); setJudgingActive(false); setDebateVerdict(null);
+    setGapSubtasks([]); setGapPlanningActive(false);
+    setPlanCardsExpanded(true); setGapCardsExpanded(true);
+    maxProgress.current = 0;
+    stageProgress.current = { plan: { total: 0, done: 0 }, gap: { total: 0, done: 0 } };
     setClarifyQuestions([]); setClarifyOptions([]); setClarifyAnswers([]);
     setLog([mkLog('start', 'Initialization', `Query: ${trimmed.slice(0, 120)}`)]);
     setRightTab('steps');
@@ -654,13 +1093,19 @@ export default function Home() {
     setHistory(prev => [{
       id, query: trimmed, title: '', runId: '', createdAt: Date.now(), phase: 'querying',
       subtasks: [], sources: [], log: [], report: '', showReport: false, chatMessages: [],
-      usageStats: null,
+      usageStats: null, debateTurns: [], gapSubtasks: [], debateRun: debateMode, debateVerdict: null,
     }, ...prev]);
 
     try {
       const res = await fetch(`${API}/research`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Client-Id': clientId },
-        body: JSON.stringify({ query: query.trim(), model: selectedModel || undefined }),
+        body: JSON.stringify({
+          query: trimmed,
+          model: selectedModel || undefined,
+          debate: debateMode,
+          advocate_model: debateMode ? advocateModel || undefined : undefined,
+          skeptic_model: debateMode ? skepticModel || undefined : undefined,
+        }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       await readStream(res, handleEvent);
@@ -681,8 +1126,8 @@ export default function Home() {
     } catch (e) { setError(String(e)); setPhase('error'); }
   }
 
-  async function sendChat() {
-    const q = chatInput.trim();
+  async function sendChat(override?: string) {
+    const q = (override ?? chatInput).trim();
     if (!q || chatStreaming) return;
     setChatInput(''); setChatStreaming(true);
     const historySnap = [...chatMessages];
@@ -773,6 +1218,12 @@ export default function Home() {
     setSupervisorThinking(''); setSupervisorThinkingExpanded(false);
     setSynthesizingActive(false); setResearchEndTime(null); setCopied(false);
     setUsageStats(null);
+    setDebateTurns([]); setDebatingActive(false); setDebateExpanded(true); setDebateStreaming(null);
+    setDebateRun(false); setJudgingActive(false); setDebateVerdict(null);
+    setGapSubtasks([]); setGapPlanningActive(false);
+    setPlanCardsExpanded(true); setGapCardsExpanded(true); setDocxBusy(false);
+    maxProgress.current = 0;
+    stageProgress.current = { plan: { total: 0, done: 0 }, gap: { total: 0, done: 0 } };
     setClarifyQuestions([]); setClarifyOptions([]); setClarifyAnswers([]);
     setActiveId(null);
     setView('research');
@@ -811,6 +1262,104 @@ export default function Home() {
     });
   }
 
+  // Assemble the full session (title, usage, questions, debate, verdict,
+  // report) into one Markdown document — shared by the .md and .docx downloads
+  // so both formats always carry identical content. Pure client-side
+  // formatting of state we already have — no API or LLM calls.
+  function buildSessionMarkdown(): { markdown: string; basename: string } {
+    const modelLabel = (id: string) => modelOptions.find(o => o.id === id)?.label ?? id;
+    const lines: string[] = [];
+
+    lines.push(`# ${displayQuery}`, '');
+    lines.push(`> **Research query:** ${query}`, '');
+    lines.push(`*Generated by MindClash on ${new Date().toLocaleString()}*`, '');
+
+    if (usageStats) {
+      lines.push('## Run Summary', '');
+      lines.push('| Metric | Value |');
+      lines.push('| --- | --- |');
+      lines.push(`| Lead model | ${modelLabel(usageStats.leadModel)} |`);
+      lines.push(`| Subagent model | ${usageStats.subagentModel} |`);
+      lines.push(`| Total tokens | ${usageStats.totalTokens.toLocaleString()} (${usageStats.inputTokens.toLocaleString()} in / ${usageStats.outputTokens.toLocaleString()} out) |`);
+      lines.push(`| Estimated cost | $${usageStats.costUsd.toFixed(4)} |`);
+      lines.push(`| Total time | ${usageStats.elapsedSeconds.toFixed(1)}s |`);
+      lines.push('');
+    }
+
+    if (subtasks.length > 0) {
+      lines.push('## Research Questions', '');
+      subtasks.forEach((s, i) => {
+        lines.push(`${i + 1}. ${s.question} *(${s.findingsCount} finding${s.findingsCount !== 1 ? 's' : ''})*`);
+      });
+      lines.push('');
+    }
+
+    if (debateTurns.length > 0) {
+      lines.push('## Debate', '');
+      for (const t of debateTurns) {
+        lines.push(`### Round ${t.round} — ${t.agent === 'advocate' ? 'Proposition' : 'Opposition'} (${modelLabel(t.model)})`, '');
+        lines.push(t.content, '');
+      }
+      if (debateVerdict) {
+        const label = debateVerdict.winner === 'draw' ? 'Draw' : `${verdictWinnerLabel(debateVerdict.winner)} wins`;
+        lines.push(`### Judge's Verdict — ${label}`, '');
+        lines.push(`*Judged by ${modelLabel(debateVerdict.model)}*`, '');
+        lines.push('', '| Category | Assessment | Winner |', '|---|---|---|');
+        for (const row of debateVerdict.rows) {
+          lines.push(`| ${row.category} | ${row.assessment} | ${verdictWinnerLabel(row.winner)} |`);
+        }
+        lines.push('');
+      }
+    }
+
+    if (gapSubtasks.length > 0) {
+      lines.push('## Follow-up Research — Gaps from the Debate', '');
+      gapSubtasks.forEach((s, i) => {
+        lines.push(`${i + 1}. ${s.question} *(${s.findingsCount} finding${s.findingsCount !== 1 ? 's' : ''})*`);
+      });
+      lines.push('');
+    }
+
+    lines.push('## Final Report', '');
+    lines.push(report, '');
+
+    const slug = (title || query).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'research';
+    const date = new Date().toISOString().slice(0, 10);
+    return { markdown: lines.join('\n'), basename: `${slug}-${date}` };
+  }
+
+  function saveBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadSessionMarkdown() {
+    if (!report) return;
+    const { markdown, basename } = buildSessionMarkdown();
+    saveBlob(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }), `${basename}.md`);
+  }
+
+  // Same session content as the .md download, packed into a Word document.
+  // The converter (and the docx lib behind it) loads on demand via import().
+  async function downloadSessionDocx() {
+    if (!report || docxBusy) return;
+    setDocxBusy(true);
+    try {
+      const { markdown, basename } = buildSessionMarkdown();
+      const { markdownToDocxBlob } = await import('./lib/markdown-docx');
+      saveBlob(await markdownToDocxBlob(markdown), `${basename}.docx`);
+    } catch (e) {
+      // The done view has no error banner — surface the failure directly
+      window.alert(`DOCX export failed: ${String(e)}`);
+    } finally {
+      setDocxBusy(false);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
@@ -843,7 +1392,7 @@ export default function Home() {
           >
             <MenuIcon />
           </button>
-          <h1 className="text-sm font-bold text-gray-900 tracking-tight">Deep Research Agent</h1>
+          <h1 className="text-sm font-bold text-gray-900 tracking-tight">MindClash</h1>
         </div>
 
         {/* ═══════════ EVAL DASHBOARD ═══════════ */}
@@ -1081,11 +1630,11 @@ export default function Home() {
             {phase !== 'clarifying' ? (
               /* ── Home: hero + centered input ── */
               <div className="flex-1 flex flex-col items-center justify-center gap-4 px-4 sm:px-6 text-center">
-                <span className="text-5xl mb-1">🔍</span>
+                <span className="text-5xl mb-1">📝</span>
                 <div className="flex flex-col items-center gap-1">
                   <h2 className="text-2xl font-bold text-gray-900">Start Your Research</h2>
                   <p className="text-gray-400 text-sm max-w-md">
-                    Ask a question to begin comprehensive AI-powered research
+                    Ask a question to begin comprehensive AI-powered deep research
                   </p>
                 </div>
                 {phase === 'error' && (
@@ -1104,6 +1653,34 @@ export default function Home() {
                       className="w-full bg-transparent px-4 pt-4 pb-2 text-sm focus:outline-none disabled:text-gray-600 disabled:cursor-default min-h-[64px]"
                     />
                     <div className="flex items-center justify-end gap-2 px-3 pb-2.5 pt-1">
+                      <div ref={debateInfoRef} className="mr-auto flex items-center gap-0.5 relative">
+                        <button
+                          type="button"
+                          onClick={() => setDebateMode(v => !v)}
+                          disabled={phase === 'querying'}
+                          className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-2.5 py-1.5 border transition-colors disabled:cursor-default disabled:opacity-50 focus:outline-none ${
+                            debateMode
+                              ? 'bg-rose-50 border-rose-200 text-rose-600'
+                              : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                          }`}
+                        >
+                          ⚔️   Debate {debateMode ? 'on' : 'off'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDebateInfoOpen(v => !v)}
+                          aria-label="What is debate mode?"
+                          className="flex items-center text-gray-400 hover:text-gray-600 focus:outline-none p-1"
+                        >
+                          <InfoIcon />
+                        </button>
+                        {debateInfoOpen && (
+                          <div className="absolute bottom-full left-0 mb-2 w-64 bg-gray-900 text-white text-xs text-left leading-relaxed rounded-xl shadow-lg px-3 py-2.5 z-10">
+                            When enabled, two AI models challenge each other’s answers, identify weaknesses and missing information, then do extra research before producing a final response. This takes longer but often results in a more thorough and accurate answer.
+                            <div className="absolute top-full left-4 w-2 h-2 bg-gray-900 rotate-45 -mt-1" />
+                          </div>
+                        )}
+                      </div>
                       {modelOptions.length > 0 && (
                         <ModelPicker
                           options={modelOptions}
@@ -1113,15 +1690,63 @@ export default function Home() {
                         />
                       )}
                       <button
-                        onClick={startResearch}
+                        onClick={() => startResearch()}
                         disabled={!query.trim() || phase === 'querying'}
                         className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl px-5 py-2 text-sm font-semibold transition-colors whitespace-nowrap focus:outline-none"
                       >
                         {phase === 'querying' ? <><Spinner /> Thinking…</> : <><SendIcon /> Research</>}
                       </button>
                     </div>
+                    {debateMode && (
+                      <div className="flex flex-col gap-1.5 px-4 pb-3 pt-2 border-t border-gray-100">
+                        <span className="hidden sm:block text-[11px] text-gray-400 text-left">
+                          Two agents from different AI companies debate the findings
+                        </span>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                          {/* Label + picker wrap together as one unit */}
+                          <span className="flex items-center gap-1 whitespace-nowrap">
+                            <span className="text-[11px] text-gray-400 font-medium">Proposition</span>
+                            <ModelPicker
+                              options={modelOptions}
+                              value={advocateModel}
+                              onChange={setAdvocateModel}
+                              disabled={phase === 'querying'}
+                            />
+                          </span>
+                          <span className="flex items-center gap-1 whitespace-nowrap">
+                            <span className="text-[11px] text-gray-400 font-medium">Opposition</span>
+                            <ModelPicker
+                              options={modelOptions}
+                              value={skepticModel}
+                              onChange={setSkepticModel}
+                              disabled={phase === 'querying'}
+                            />
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
+
+                {/* Suggested research queries — click to fill the input */}
+                {phase === 'idle' && (
+                  <div className="w-full max-w-2xl mt-5">
+                    <p className="text-[11px] uppercase tracking-wide text-gray-400 font-medium mb-2.5">
+                      Try one of these
+                    </p>
+                    <div className="flex flex-wrap justify-center gap-2">
+                      {SUGGESTED_QUERIES.map(s => (
+                        <button
+                          key={s}
+                          onClick={() => setQuery(s)}
+                          className="px-4 py-2 rounded-full border border-gray-200 bg-white text-[13px] text-gray-600 hover:border-blue-400 hover:text-blue-600 hover:shadow-sm transition-all"
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               /* ── Clarification questions ── */
@@ -1221,12 +1846,34 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Progress bar — starts at 3%, never goes backward, hidden once report revealed */}
+            {/* Progress bar + milestone trail — starts at 3%, never goes backward,
+                hidden once report revealed */}
             {progressPct < 100 && (
               <div className="flex-shrink-0 border-b border-gray-100 px-4 sm:px-6 py-2.5 bg-gray-50">
-                <div className="flex items-center justify-between text-xs text-gray-500 mb-1.5">
-                  <span>Progress</span>
-                  <span className="font-medium text-gray-700">
+                <div className="flex items-center justify-between gap-3 text-xs text-gray-500 mb-1.5">
+                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 min-w-0">
+                    {milestones.map((m, i) => (
+                      <span key={m} className="flex items-center gap-1">
+                        {i > 0 && <span className="text-gray-300 mx-0.5">›</span>}
+                        {i < milestoneIdx && (
+                          <svg className="w-3 h-3 text-emerald-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                        {i === milestoneIdx && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
+                        )}
+                        <span className={`text-[11px] font-medium whitespace-nowrap ${
+                          i < milestoneIdx ? 'text-emerald-600'
+                            : i === milestoneIdx ? 'text-blue-600'
+                            : 'text-gray-400'
+                        }`}>
+                          {m}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                  <span className="font-medium text-gray-700 flex-shrink-0">
                     {progressPct <= 3 ? '--' : `${progressPct}%`}
                   </span>
                 </div>
@@ -1243,16 +1890,40 @@ export default function Home() {
             <div className="flex-1 flex flex-col lg:flex-row min-h-0">
 
               {/* ── Center ── */}
-              <div className={`flex-1 min-h-0 flex-col min-w-0 overflow-y-auto ${showActivityMobile ? 'hidden lg:flex' : 'flex'}`}>
+              <div ref={centerRef} className={`flex-1 min-h-0 flex-col min-w-0 overflow-y-auto ${showActivityMobile ? 'hidden lg:flex' : 'flex'}`}>
 
                 {/* Query heading */}
                 <div className="px-4 sm:px-6 lg:px-8 pt-5 sm:pt-7 pb-5 border-b border-gray-100">
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <h2 className="text-xl sm:text-2xl font-bold text-gray-900 leading-snug">{displayQuery}</h2>
                     {report && (
+                    <div className="flex-shrink-0 flex items-center gap-2">
+                      <button
+                        onClick={downloadSessionMarkdown}
+                        title="Download the full session (questions, debate, report) as Markdown"
+                        className="flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-1.5 border bg-white border-gray-300 text-gray-600 hover:border-gray-400 hover:text-gray-800 transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
+                        </svg>
+                        Download .md
+                      </button>
+                      <button
+                        onClick={downloadSessionDocx}
+                        disabled={docxBusy}
+                        title="Download the full session (questions, debate, report) as a Word document"
+                        className="flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-1.5 border bg-white border-gray-300 text-gray-600 hover:border-gray-400 hover:text-gray-800 transition-colors disabled:opacity-50 disabled:cursor-default"
+                      >
+                        {docxBusy ? <Spinner /> : (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
+                          </svg>
+                        )}
+                        Download .docx
+                      </button>
                       <button
                         onClick={copyReport}
-                        className={`flex-shrink-0 flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-1.5 border transition-colors ${
+                        className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-1.5 border transition-colors ${
                           copied
                             ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
                             : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400 hover:text-gray-800'
@@ -1274,6 +1945,7 @@ export default function Home() {
                           </>
                         )}
                       </button>
+                    </div>
                     )}
                   </div>
                   {phase === 'researching' && (
@@ -1285,7 +1957,7 @@ export default function Home() {
 
                 {/* Completion banner */}
                 {report && (
-                  <div className="mx-4 sm:mx-6 lg:mx-8 mt-6 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3.5 flex items-center gap-2">
+                  <div className="mx-4 sm:mx-6 lg:mx-8 mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3.5 flex items-center gap-2">
                     <span className="text-base">✨</span>
                     <span className="text-sm font-semibold text-gray-800">
                       Research completed! Final report is ready to display.
@@ -1326,10 +1998,12 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Inline step indicators */}
-                <div className="px-4 sm:px-6 lg:px-8 pt-5 pb-2 space-y-3">
+                {/* Inline step indicators — live-run only, so the container's
+                    padding never leaves a phantom gap on finished sessions */}
+                {phase === 'researching' && (
+                <div className="px-4 sm:px-6 lg:px-8 pt-4 space-y-3">
                   {/* Planning */}
-                  {phase === 'researching' && subtasks.length === 0 && !supervisorThinking && (
+                  {subtasks.length === 0 && !supervisorThinking && (
                     <div className="flex items-center gap-2 text-sm text-gray-500">
                       <Spinner />
                       <span>🎯 Planning research strategy and identifying key information sources…</span>
@@ -1337,7 +2011,7 @@ export default function Home() {
                   )}
 
                   {/* Supervisor thinking block — only while researching is in progress */}
-                  {phase === 'researching' && supervisorThinking && (
+                  {supervisorThinking && (
                     <div className="text-sm text-gray-700">
                       <p>
                         <span className="text-base mr-1.5">🤔</span>
@@ -1367,6 +2041,22 @@ export default function Home() {
                     </div>
                   )}
 
+                  {/* Debating — shown while the adversarial debate loop runs */}
+                  {debatingActive && (
+                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                      <Spinner />
+                      <span>⚖️ Agents are debating the findings — proposition vs opposition…</span>
+                    </div>
+                  )}
+
+                  {/* Gap planning — the lead distills debate objections into follow-up questions */}
+                  {gapPlanningActive && (
+                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                      <Spinner />
+                      <span>🧩 Identifying evidence gaps from the debate…</span>
+                    </div>
+                  )}
+
                   {/* Synthesizing — shown when synthesizingActive is set by backend event */}
                   {synthesizingActive && (
                     <div className="flex items-center gap-2 text-sm text-gray-500">
@@ -1375,40 +2065,182 @@ export default function Home() {
                     </div>
                   )}
                 </div>
+                )}
 
-                {/* Subtask cards — hidden once the final report is ready */}
-                {subtasks.length > 0 && !(showReport && report) && (
-                  <div className="px-4 sm:px-6 lg:px-8 pt-3 pb-4 space-y-2">
-                    <p className="text-[11px] uppercase tracking-wide text-gray-400 font-medium mb-3">
-                      Research Plan
-                    </p>
-                    {subtasks.map((s, i) => (
-                      <div
-                        key={i}
-                        className={`flex items-start gap-3 px-4 py-3 rounded-xl border transition-colors ${
-                          s.status === 'done' ? 'bg-emerald-50 border-emerald-200' : 'bg-gray-50 border-gray-200'
-                        }`}
+                {/* Initial question cards — collapsible like the debate panel, so
+                    the plan stays re-openable after the debate/report take the stage */}
+                {subtasks.length > 0 && (
+                  <SubtaskCards
+                    heading="Research Plan"
+                    icon="🔎"
+                    subtasks={subtasks}
+                    expanded={planCardsExpanded}
+                    onToggle={() => setPlanCardsExpanded(v => !v)}
+                  />
+                )}
+
+                {/* Debate panel — appears as soon as the debate starts, visible while
+                    researching AND after completion */}
+                {(debatingActive || debateTurns.length > 0 || debateStreaming) && (
+                  <div className="px-4 sm:px-6 lg:px-8 pt-4">
+                    <div className="border border-rose-200 rounded-2xl overflow-hidden">
+                      <button
+                        onClick={() => setDebateExpanded(v => !v)}
+                        className="w-full bg-rose-50 px-5 py-3 flex items-center gap-2 text-left focus:outline-none"
                       >
-                        {s.status === 'done'
-                          ? <span className="mt-1.5 w-2 h-2 rounded-full flex-shrink-0 bg-emerald-500" />
-                          : <span className="mt-0.5 flex-shrink-0"><Spinner /></span>
-                        }
-                        <span className={`flex-1 text-sm leading-relaxed ${
-                          s.status === 'done' ? 'text-emerald-800' : 'text-gray-600'
-                        }`}>{s.question.charAt(0).toUpperCase() + s.question.slice(1)}</span>
-                        {s.status === 'done' && (
-                          <span className="text-[11px] text-emerald-600 font-medium whitespace-nowrap">
-                            {s.findingsCount} finding{s.findingsCount !== 1 ? 's' : ''}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                        <span className="text-base">⚖️</span>
+                        <span className="text-sm font-semibold text-gray-800">
+                          Debate ({debateTurns.length} turn{debateTurns.length !== 1 ? 's' : ''})
+                        </span>
+                        <svg
+                          className={`w-4 h-4 text-gray-400 ml-auto transition-transform ${debateExpanded ? 'rotate-180' : ''}`}
+                          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      {debateExpanded && (
+                        <div className="px-3 sm:px-4 py-4 space-y-4">
+                          {debateTurns.map((t, i) => (
+                            <DebateBubble
+                              key={i}
+                              agent={t.agent}
+                              round={t.round}
+                              modelLabel={modelOptions.find(o => o.id === t.model)?.label ?? t.model}
+                              content={t.content}
+                            />
+                          ))}
+                          {debateStreaming && (
+                            <DebateBubble
+                              agent={debateStreaming.agent}
+                              round={Math.floor(debateTurns.length / 2) + 1}
+                              modelLabel={(() => {
+                                const id = debateStreaming.agent === 'advocate' ? advocateModel : skepticModel;
+                                return modelOptions.find(o => o.id === id)?.label ?? id;
+                              })()}
+                              content={debateStreaming.content}
+                              streaming
+                            />
+                          )}
+                          {debatingActive && !debateStreaming && (() => {
+                            // Between turns: whoever spoke last is about to receive a
+                            // rebuttal, so show the other side as waiting for their turn.
+                            // Proposition speaks first when nothing has happened yet.
+                            const activeAgent: DebateTurn['agent'] | null = debateTurns.length > 0
+                              ? debateTurns[debateTurns.length - 1].agent
+                              : null;
+                            const thinkingAgent: DebateTurn['agent'] = activeAgent === 'advocate' ? 'skeptic' : 'advocate';
+                            const id = thinkingAgent === 'advocate' ? advocateModel : skepticModel;
+                            const modelLabel = modelOptions.find(o => o.id === id)?.label ?? id;
+                            return (
+                              <DebateBubble
+                                agent={thinkingAgent}
+                                round={Math.floor(debateTurns.length / 2) + 1}
+                                modelLabel={modelLabel}
+                                content=""
+                                thinking
+                              />
+                            );
+                          })()}
+                          <div ref={debateEndRef} />
+                        </div>
+                      )}
+                    </div>
                   </div>
+                )}
+
+                {/* Judge's verdict card — appears as soon as judging starts (with a
+                    "thinking" placeholder) so the next step shows up instantly when
+                    the debate panel collapses, then fills in once the verdict arrives.
+                    Auto-collapses once the final report is ready. */}
+                {(judgingActive || debateVerdict) && (
+                  <div className="px-4 sm:px-6 lg:px-8 pt-4">
+                    <div className="border border-amber-200 rounded-2xl overflow-hidden">
+                      <button
+                        onClick={() => setVerdictExpanded(v => !v)}
+                        className="w-full bg-amber-50 px-5 py-3 flex flex-wrap items-center gap-2 text-left focus:outline-none"
+                      >
+                        <span className="text-base">🏆</span>
+                        <span className="text-sm font-semibold text-gray-800">Judge&apos;s Verdict</span>
+                        {debateVerdict ? (
+                          <span className={`text-[11px] font-semibold rounded-full px-2.5 py-0.5 border ${
+                            debateVerdict.winner === 'proposition'
+                              ? 'bg-blue-50 border-blue-200 text-blue-700'
+                              : debateVerdict.winner === 'opposition'
+                                ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                : 'bg-gray-100 border-gray-300 text-gray-600'
+                          }`}>
+                            {debateVerdict.winner === 'draw' ? 'Draw' : `${verdictWinnerLabel(debateVerdict.winner)} wins`}
+                          </span>
+                        ) : null}
+                        <span className="ml-auto flex items-center gap-2 text-[11px] text-gray-400">
+                          {debateVerdict && (
+                            <>Judged by {modelOptions.find(o => o.id === debateVerdict.model)?.label ?? debateVerdict.model}</>
+                          )}
+                          <svg
+                            className={`w-4 h-4 text-gray-400 transition-transform ${verdictExpanded ? 'rotate-180' : ''}`}
+                            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </span>
+                      </button>
+                      {verdictExpanded && (
+                        debateVerdict ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-left border-collapse">
+                              <thead>
+                                <tr className="border-t border-amber-100 text-[11px] text-gray-400 uppercase tracking-wide">
+                                  <th className="px-5 py-2 font-semibold">Category</th>
+                                  <th className="px-5 py-2 font-semibold">Judge&apos;s Assessment</th>
+                                  <th className="px-5 py-2 font-semibold whitespace-nowrap">Winner</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {debateVerdict.rows.map((row, i) => (
+                                  <tr key={i} className="border-t border-amber-100">
+                                    <td className="px-5 py-2.5 font-medium text-gray-800 whitespace-nowrap">{row.category}</td>
+                                    <td className="px-5 py-2.5 text-gray-600">{row.assessment}</td>
+                                    <td className="px-5 py-2.5 whitespace-nowrap">
+                                      <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 border ${
+                                        row.winner === 'proposition'
+                                          ? 'bg-blue-50 border-blue-200 text-blue-700'
+                                          : row.winner === 'opposition'
+                                            ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                            : 'bg-gray-100 border-gray-300 text-gray-600'
+                                      }`}>
+                                        {verdictWinnerLabel(row.winner)}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-sm text-gray-400 px-5 py-4 border-t border-amber-100">
+                            <Spinner /> The judge is weighing both sides of the debate…
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Second finding round — gap questions distilled from the debate */}
+                {gapSubtasks.length > 0 && (
+                  <SubtaskCards
+                    heading="Follow-up Research — Gaps from the Debate"
+                    icon="🧩"
+                    subtasks={gapSubtasks}
+                    expanded={gapCardsExpanded}
+                    onToggle={() => setGapCardsExpanded(v => !v)}
+                  />
                 )}
 
                 {/* Report */}
                 {showReport && report && (
-                  <div className="px-4 sm:px-6 lg:px-8 pt-5 pb-8">
+                  <div className="px-4 sm:px-6 lg:px-8 pt-4 pb-8">
                     <div className="border border-gray-200 rounded-2xl overflow-hidden">
                       <div className="bg-gray-50 px-5 py-3 border-b border-gray-200 flex items-center gap-2">
                         <span className="text-base">📄</span>
@@ -1470,6 +2302,25 @@ export default function Home() {
                           </div>
                         ))}
                         <div ref={chatEndRef} />
+                      </div>
+                    )}
+                    {chatMessages.length === 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          'Summarize the key findings in 3 bullet points',
+                          'What is the strongest evidence here?',
+                          'What are the main uncertainties or limitations?',
+                          'What should I research next?',
+                        ].map(q => (
+                          <button
+                            key={q}
+                            onClick={() => sendChat(q)}
+                            disabled={chatStreaming}
+                            className="text-xs border border-gray-200 rounded-full px-3 py-1.5 text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-colors disabled:opacity-40"
+                          >
+                            {q}
+                          </button>
+                        ))}
                       </div>
                     )}
                     <div className="flex gap-2">
@@ -1540,11 +2391,14 @@ export default function Home() {
                           const isLast = i === log.length - 1;
                           // Use server timestamps when available for accurate per-step timing
                           const getTs = (e: LogEntry) => e.serverTs ?? e.createdAt;
-                          const endTs = isLast ? researchEndTime : getTs(log[i + 1]);
-                          const durationMs = endTs !== null && endTs !== undefined ? endTs - getTs(entry) : null;
-                          const durSec = durationMs === null
-                            ? null
-                            : durationMs < 100 ? '< 0.1' : (durationMs / 1000).toFixed(1);
+                          // Last step: live-tick while researching, then anchor to the
+                          // run's end time (or the step's own ts) so it never sticks on "Running…"
+                          const running = isLast && researchEndTime === null && phase === 'researching';
+                          const endTs = isLast
+                            ? (researchEndTime ?? (running ? Math.max(nowTick, getTs(entry)) : getTs(entry)))
+                            : getTs(log[i + 1]);
+                          const durationMs = endTs - getTs(entry);
+                          const durSec = durationMs < 100 ? '< 0.1' : (durationMs / 1000).toFixed(1);
                           const firstTs = log[0] ? getTs(log[0]) : getTs(entry);
                           const totalSec = ((getTs(entry) - firstTs) / 1000).toFixed(1);
                           return (
@@ -1563,13 +2417,13 @@ export default function Home() {
 
                                 {/* Timing row */}
                                 <div className="text-[10px] mb-1.5">
-                                  {durSec !== null ? (
-                                    <span className="font-mono text-gray-500">⏱ {durSec}s; total: {totalSec}s</span>
-                                  ) : (
-                                    <span className="text-blue-500 flex items-center gap-1">
+                                  {running ? (
+                                    <span className="text-blue-500 flex items-center gap-1 font-mono">
                                       <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse inline-block" />
-                                      Running…
+                                      Running… {durSec}s
                                     </span>
+                                  ) : (
+                                    <span className="font-mono text-gray-500">⏱ {durSec}s; total: {totalSec}s</span>
                                   )}
                                 </div>
 

@@ -178,7 +178,7 @@ async def test_run_grounding_checks_caches_by_url() -> None:
 # ---------------------------------------------------------------------------
 
 def _mock_structured_chain(monkeypatch, module: str, prompt_attr: str, parsed: object) -> MagicMock:
-    """Patch `<module>.<prompt_attr>` and `<module>.ChatOpenAI` so any chain built
+    """Patch `<module>.<prompt_attr>` and `<module>.make_chat_model` so any chain built
     from `<prompt_attr> | llm.with_structured_output(..., include_raw=True)`
     returns `{"raw": <message with usage_metadata>, "parsed": parsed}`."""
     raw_message = SimpleNamespace(usage_metadata={"input_tokens": 10, "output_tokens": 5})
@@ -188,7 +188,7 @@ def _mock_structured_chain(monkeypatch, module: str, prompt_attr: str, parsed: o
     mock_prompt = MagicMock()
     mock_prompt.__or__ = lambda self, other: mock_chain
     monkeypatch.setattr(f"{module}.{prompt_attr}", mock_prompt)
-    monkeypatch.setattr(f"{module}.ChatOpenAI", lambda **kw: MagicMock())
+    monkeypatch.setattr(f"{module}.make_chat_model", lambda *a, **kw: MagicMock())
     return mock_chain
 
 

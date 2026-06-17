@@ -16,11 +16,10 @@ from __future__ import annotations
 from datetime import date
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
-from engine.models import LEAD_MODEL
+from engine.models import LEAD_MODEL, make_chat_model, structured_output_kwargs
 from engine.state import Clarification, ResearchState
 from engine.usage import usage_from_message
 
@@ -83,6 +82,12 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "tap as quick answers. Options must be concise (≤30 chars), mutually exclusive, "
         "and cover the most likely choices. Always include a variety option like "
         "'All of the above' or 'General overview' where appropriate.\n\n"
+        "Mutually exclusive means no option's range or scope may contain or "
+        "overlap with another's — e.g. for a time-frame question, never offer both "
+        "'Since launch in 1990 to present' and 'Long-term trend analysis "
+        "(1990-2026)', since the first is just a restatement of the second. Pick "
+        "ONE way to describe each distinct time frame and make sure every pair of "
+        "options is clearly distinguishable at a glance.\n\n"
         "Example of a GOOD question for 'How is the SWE job market in Singapore?':\n"
         "  question: 'Who is this research for?'\n"
         "  options: ['Job seeker', 'Employer / hiring', 'Investor', 'General curiosity']\n\n"
@@ -104,13 +109,14 @@ def clarify(state: ResearchState) -> dict[str, object]:
         return {}
 
     model = state.get("lead_model", LEAD_MODEL)
-    llm: ChatOpenAI = ChatOpenAI(model=model, temperature=0)
+    llm = make_chat_model(model, temperature=0)
     chain = _PROMPT | llm.with_structured_output(
-        ClarifyDecision, method="function_calling", include_raw=True
+        ClarifyDecision, include_raw=True, **structured_output_kwargs(model)
     )
     raw = chain.invoke(
         {"query": state["query"], "current_date": date.today().strftime("%B %d, %Y")}
     )
+    assert isinstance(raw, dict)  # include_raw=True returns {"raw", "parsed", "parsing_error"}
     decision: ClarifyDecision = raw["parsed"]
     usage = usage_from_message(raw["raw"], "clarify", model)
     token_usage = [usage] if usage else []
