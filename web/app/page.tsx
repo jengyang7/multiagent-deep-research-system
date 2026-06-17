@@ -606,7 +606,13 @@ export default function Home() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [publicRuns, setPublicRuns] = useState<{id: string; title: string; query: string}[]>([]);
 
-  const [libraryChatMessages,  setLibraryChatMessages]  = useState<LibraryChatMessage[]>([]);
+  const LIBRARY_HISTORY_KEY = 'mindclash_library_history';
+  const [libraryChatMessages,  setLibraryChatMessages]  = useState<LibraryChatMessage[]>(() => {
+    try {
+      const stored = localStorage.getItem('mindclash_library_history');
+      return stored ? JSON.parse(stored) : [];
+    } catch { return []; }
+  });
   const [libraryChatInput,     setLibraryChatInput]     = useState('');
   const [libraryChatStreaming, setLibraryChatStreaming] = useState(false);
   const [librarySteps,         setLibrarySteps]         = useState<LibraryStep[]>([]);
@@ -679,10 +685,18 @@ export default function Home() {
   // visitors only see their own data. Generated once and persisted locally.
   const [clientId, setClientId] = useState('');
 
-  const logEndRef    = useRef<HTMLDivElement>(null);
-  const chatEndRef   = useRef<HTMLDivElement>(null);
-  const debateEndRef = useRef<HTMLDivElement>(null);
-  const centerRef    = useRef<HTMLDivElement>(null);
+  const logEndRef         = useRef<HTMLDivElement>(null);
+  const chatEndRef        = useRef<HTMLDivElement>(null);
+  const debateEndRef      = useRef<HTMLDivElement>(null);
+  const centerRef         = useRef<HTMLDivElement>(null);
+  const libraryChatEndRef  = useRef<HTMLDivElement>(null);
+  const libraryStepsEndRef = useRef<HTMLDivElement>(null);
+  const libraryStepIdRef   = useRef(0);
+
+  // Persist library chat history to localStorage
+  useEffect(() => {
+    try { localStorage.setItem(LIBRARY_HISTORY_KEY, JSON.stringify(libraryChatMessages)); } catch {}
+  }, [libraryChatMessages]);
 
   // Follow new steps only while a run is live — opening a finished session from
   // history must show it from the top, not auto-scrolled to the bottom.
@@ -695,6 +709,16 @@ export default function Home() {
   useEffect(() => {
     if (chatStreaming) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, chatStreaming]);
+
+  // Library chat: scroll to bottom while streaming
+  useEffect(() => {
+    if (libraryChatStreaming) libraryChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [libraryChatMessages, libraryChatStreaming]);
+
+  // Library steps: always scroll to newest step
+  useEffect(() => {
+    if (libraryChatStreaming) libraryStepsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [librarySteps, libraryChatStreaming]);
 
   // Switching sessions (or pages) lands at the top of the restored session
   useEffect(() => { centerRef.current?.scrollTo({ top: 0 }); }, [activeId, view]);
@@ -1179,15 +1203,13 @@ export default function Home() {
     if (!q || libraryChatStreaming) return;
     setLibraryChatInput('');
     setLibraryChatStreaming(true);
-    setLibrarySteps([]);
     setLibraryChunks([]);
     setLibraryRightTab('steps');
     const historySnap = [...libraryChatMessages];
     setLibraryChatMessages(prev => [...prev, { role: 'user', content: q }, { role: 'assistant', content: '' }]);
     let reply = '';
-    let stepId = 0;
     const addStep = (type: LibraryStepType, label: string, detail?: string) =>
-      setLibrarySteps(prev => [...prev, { id: ++stepId, type, label, detail, ts: nowTs() }]);
+      setLibrarySteps(prev => [...prev, { id: ++libraryStepIdRef.current, type, label, detail, ts: nowTs() }]);
     try {
       const res = await fetch(`${API}/library/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1200,7 +1222,7 @@ export default function Home() {
       let finalSources: LibrarySource[] = [];
       await readStream(res, data => {
         if (data.type === 'searching') {
-          addStep('searching', 'Searching Reports', 'Embedding question and running cosine similarity across all indexed reports…');
+          addStep('searching', 'Thinking', 'Searching indexed reports…');
         } else if (data.type === 'chunks_retrieved') {
           const chunks = (data.chunks as RetrievedChunk[]) ?? [];
           setLibraryChunks(chunks);
@@ -1463,7 +1485,15 @@ export default function Home() {
               </svg>
               <span className="text-sm font-semibold text-gray-800">Research Library</span>
               <span className="hidden sm:inline text-xs text-gray-400">· Ask questions across all your past research</span>
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-2">
+                {libraryChatMessages.length > 0 && (
+                  <button
+                    onClick={() => { setLibraryChatMessages([]); try { localStorage.removeItem(LIBRARY_HISTORY_KEY); } catch {} }}
+                    className="text-xs text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg px-2.5 py-1.5 transition-colors font-medium"
+                  >
+                    Clear history
+                  </button>
+                )}
                 <button
                   onClick={() => setShowLibraryActivityMobile(v => !v)}
                   className="lg:hidden flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg px-2.5 py-1.5 transition-colors"
@@ -1522,7 +1552,12 @@ export default function Home() {
                                   [&_ul]:list-disc [&_ul]:pl-4 [&_ul]:mb-2 [&_ul]:space-y-1
                                   [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:mb-2 [&_ol]:space-y-1
                                   [&_li]:leading-relaxed [&_strong]:font-semibold [&_strong]:text-gray-900
-                                  [&_code]:bg-gray-200 [&_code]:px-1 [&_code]:rounded text-xs leading-relaxed">
+                                  [&_code]:bg-gray-200 [&_code]:px-1 [&_code]:rounded
+                                  [&_table]:w-full [&_table]:border-collapse [&_table]:my-2 [&_table]:text-xs
+                                  [&_th]:border [&_th]:border-gray-300 [&_th]:bg-gray-50 [&_th]:px-3 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:text-gray-700
+                                  [&_td]:border [&_td]:border-gray-300 [&_td]:px-3 [&_td]:py-1.5 [&_td]:align-top
+                                  [&_tr:nth-child(even)_td]:bg-gray-50/60
+                                  overflow-x-auto text-xs leading-relaxed">
                                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                                 </div>
                                 {m.sources && m.sources.length > 0 && (
@@ -1538,7 +1573,7 @@ export default function Home() {
                               </>
                             ) : (
                               <span className="flex items-center gap-1.5 text-gray-400 text-xs">
-                                <Spinner /> Searching reports…
+                                <Spinner /> Thinking…
                               </span>
                             )
                           ) : m.content}
@@ -1546,6 +1581,7 @@ export default function Home() {
                       </div>
                     ))
                   )}
+                  <div ref={libraryChatEndRef} />
                 </div>
 
                 {/* Input */}
@@ -1642,6 +1678,7 @@ export default function Home() {
                             </div>
                           );
                         })}
+                        <div ref={libraryStepsEndRef} />
                       </div>
                     )}
                   </div>

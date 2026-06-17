@@ -45,12 +45,15 @@ Settings.node_parser = SentenceSplitter(chunk_size=512, chunk_overlap=64)
 
 
 def _vector_store() -> PGVectorStore:
-    """Build a PGVectorStore using the DATABASE_URL env var (asyncpg driver)."""
-    # Strip asyncpg-only query params (ssl=require etc.) — PGVectorStore handles
-    # SSL via its own connection args
-    url = os.environ["DATABASE_URL"].split("?")[0]
+    """Build a PGVectorStore using the DATABASE_URL env var."""
+    # Strip query params (ssl=require etc.) — PGVectorStore handles SSL itself.
+    # from_params requires both a sync (psycopg2) and async (asyncpg) URL;
+    # DATABASE_URL uses +asyncpg, so derive the sync URL from it.
+    async_url = os.environ["DATABASE_URL"].split("?")[0]
+    sync_url = async_url.replace("+asyncpg", "+psycopg2", 1)
     return PGVectorStore.from_params(
-        async_connection_string=url,
+        connection_string=sync_url,
+        async_connection_string=async_url,
         table_name="report_chunks",
         embed_dim=EMBEDDING_DIMS,
         perform_setup=True,  # creates table + vector index on first use
@@ -109,11 +112,15 @@ async def answer_with_context(
         ChatMessage(
             role=MessageRole.SYSTEM,
             content=(
-                "You are a research assistant with access to the user's past research reports. "
-                "Answer the question using only the provided context excerpts. "
-                "Reference reports by title when citing information "
-                "(e.g. 'According to the report on X...'). "
-                "If the context is insufficient, say so honestly.\n\n"
+                "You are a concise research assistant with access to the user's past research reports.\n\n"
+                "Rules:\n"
+                "- Answer using ONLY the provided context — never invent facts.\n"
+                "- Be brief: 2–4 sentences for simple questions, one short paragraph for complex ones.\n"
+                "  Only use a table when the question explicitly asks for comparison or structure.\n"
+                "- **Bold** key terms, conclusions, and important caveats inline.\n"
+                "- Cite by report title inline when relevant: 'According to the report on X…'.\n"
+                "- Do NOT offer to reformat, summarize differently, or convert your answer.\n"
+                "- If the context is insufficient, say so in one sentence.\n\n"
                 f"Context from past reports:\n{context}"
             ),
         )
@@ -123,6 +130,6 @@ async def answer_with_context(
         messages.append(ChatMessage(role=role, content=m.get("content", "")))
     messages.append(ChatMessage(role=MessageRole.USER, content=question))
 
-    async for response in llm.astream_chat(messages):
+    async for response in await llm.astream_chat(messages):
         if response.delta:
             yield response.delta
