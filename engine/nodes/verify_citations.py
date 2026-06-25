@@ -38,6 +38,9 @@ from eval.report_parsing import (
 
 _CITATION_MARKER_RE = re.compile(r"\[(\d+)\]")
 _DANGLING_SPACE_RE = re.compile(r"[ \t]+(?=[.,;:!?])|  +")
+_EMPTY_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*$")
+_ORDERED_LIST_ITEM_RE = re.compile(r"^(\s*)(\d+)([.)])(\s+)(\S.*)$")
+_BOLD_RE = re.compile(r"(?<!\*)\*\*([^*\n]+)\*\*(?!\*)|__([^_\n]+)__")
 # Stray non-numeric bracket markers like [Synthesis] sometimes leak from the
 # debate transcript into the synthesized report — not a markdown link (no
 # trailing `(url)`) and not a valid [i] citation, so strip them too.
@@ -80,17 +83,69 @@ def _rebuild_references(
     if not cited:
         return "\n\n## References\n"
     parsed = parse_references(references)
-    entries: list[str] = []
+    grouped: dict[str, dict[str, object]] = {}
     for i in cited:
         if i in parsed:
             ref = parsed[i]
-            entries.append(f"[{i}] [{ref.title}]({ref.url})")
+            url = ref.url
+            title = ref.title
         elif 1 <= i <= len(findings):
             url = findings[i - 1]["citation_url"]
-            entries.append(f"[{i}] [{url}]({url})")
+            title = url
+        else:
+            continue
+        group = grouped.setdefault(url, {"title": title, "indices": []})
+        if group["title"] == url and title != url:
+            group["title"] = title
+        indices = group["indices"]
+        assert isinstance(indices, list)
+        indices.append(i)
+
+    entries: list[str] = []
+    for url, group in grouped.items():
+        title = str(group["title"])
+        indices = group["indices"]
+        assert isinstance(indices, list)
+        marker = ", ".join(f"[{i}]" for i in indices)
+        entries.append(f"{marker} [{title}]({url})")
     # Double-newline between entries so ReactMarkdown renders each as its own
     # paragraph (vertically stacked) rather than a single run-on line.
     return "\n\n## References\n\n" + "\n\n".join(entries) + "\n"
+
+
+def _remove_markdown_bold(text: str) -> str:
+    """Remove inline bold markers from dense reports while preserving the text."""
+    return _BOLD_RE.sub(lambda m: m.group(1) or m.group(2) or "", text)
+
+
+def _cleanup_markdown_body(body: str) -> str:
+    """Clean artifacts left after unsupported cited sentences are removed."""
+    cleaned_lines: list[str] = []
+    next_ordered_number = 1
+    in_ordered_list = False
+
+    for line in body.splitlines():
+        if _EMPTY_LIST_ITEM_RE.match(line):
+            continue
+
+        ordered_match = _ORDERED_LIST_ITEM_RE.match(line)
+        if ordered_match:
+            indent, _old_number, delimiter, spacing, rest = ordered_match.groups()
+            line = f"{indent}{next_ordered_number}{delimiter}{spacing}{rest}"
+            next_ordered_number += 1
+            in_ordered_list = True
+        elif not line.strip() or line.lstrip().startswith("#"):
+            next_ordered_number = 1
+            in_ordered_list = False
+        elif not in_ordered_list or not line.startswith((" ", "\t")):
+            next_ordered_number = 1
+            in_ordered_list = False
+
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return _remove_markdown_bold(cleaned).strip()
 
 
 async def verify_citations(state: ResearchState) -> dict[str, object]:
@@ -114,6 +169,7 @@ async def verify_citations(state: ResearchState) -> dict[str, object]:
 
     body = _NON_NUMERIC_MARKER_RE.sub("", body)
     body = _DANGLING_SPACE_RE.sub(lambda m: "" if m.group().strip() == "" else " ", body)
+    body = _cleanup_markdown_body(body)
 
     references = _rebuild_references(body, references, findings)  # type: ignore[arg-type]
     return {"report": body + references, "findings": [], "token_usage": token_usage}

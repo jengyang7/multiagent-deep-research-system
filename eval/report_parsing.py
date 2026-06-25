@@ -20,6 +20,10 @@ _REFERENCES_HEADER_RE = re.compile(r"^#{1,6}\s*References\s*$", re.IGNORECASE | 
 _REF_LINE_RE = re.compile(
     r"^\s*(?:\[(\d+)\]|(\d+)[.)])\s*\[([^\]]*)\]\(([^)]+)\)\s*$", re.MULTILINE
 )
+_REF_GROUP_LINE_RE = re.compile(
+    r"^\s*((?:\[\d+\]\s*(?:,\s*)?)+)\s*\[([^\]]*)\]\(([^)]+)\)\s*$",
+    re.MULTILINE,
+)
 _CITATION_MARKER_RE = re.compile(r"\[(\d+)\]")
 _HEADER_LINE_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _BULLET_LINE_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(.*)$")
@@ -42,13 +46,26 @@ def split_body_and_references(report: str) -> tuple[str, str]:
 def parse_references(report: str) -> dict[int, CitationRef]:
     """Parse the '## References' section into {index: CitationRef(title, url)}.
 
-    Matches lines of the form '[1] [Source Title](url)'. Returns {} if no
-    References section / no matching lines are found.
+    Matches lines of the form '[1] [Source Title](url)', numbered markdown
+    variants like '1. [Source Title](url)', and grouped duplicate-URL entries
+    like '[1], [4], [9] [Source Title](url)'. Returns {} if no References
+    section / no matching lines are found.
     """
     _, references_section = split_body_and_references(report)
     text = references_section or report
     refs: dict[int, CitationRef] = {}
+    grouped_spans: list[tuple[int, int]] = []
+    for m in _REF_GROUP_LINE_RE.finditer(text):
+        grouped_spans.append(m.span())
+        title = m.group(2).strip()
+        url = m.group(3).strip()
+        for index_text in _CITATION_MARKER_RE.findall(m.group(1)):
+            index = int(index_text)
+            refs[index] = CitationRef(index=index, title=title, url=url)
+
     for m in _REF_LINE_RE.finditer(text):
+        if any(start <= m.start() < end for start, end in grouped_spans):
+            continue
         index = int(m.group(1) or m.group(2))
         refs[index] = CitationRef(index=index, title=m.group(3).strip(), url=m.group(4).strip())
     return refs

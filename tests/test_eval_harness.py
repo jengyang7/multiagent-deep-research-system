@@ -66,6 +66,24 @@ def test_parse_references() -> None:
     assert refs[3].title == "Source C"
 
 
+def test_parse_grouped_references() -> None:
+    report = """## Body
+
+Claim [1][4].
+
+## References
+
+[1], [4] [Shared Source](https://same.com)
+
+2. [Other Source](https://other.com)
+"""
+    refs = parse_references(report)
+    assert refs[1].url == "https://same.com"
+    assert refs[4].url == "https://same.com"
+    assert refs[1].title == "Shared Source"
+    assert refs[2].url == "https://other.com"
+
+
 def test_split_body_and_references() -> None:
     body, references = split_body_and_references(_SAMPLE_REPORT)
     assert "References" not in body

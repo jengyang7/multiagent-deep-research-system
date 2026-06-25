@@ -45,9 +45,16 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "format.\n\n"
         "Before research begins, consider whether there are up to 3 clarifying "
         "questions whose answers would meaningfully change WHAT gets researched — "
-        "e.g. who the research is for, which scope/angle/sub-topic to prioritize "
-        "within a broad subject, what time frame to focus on, or which geography "
-        "applies when it's not specified and matters.\n\n"
+        "e.g. which scope/angle/sub-topic to prioritize within a broad subject, "
+        "what time frame to focus on, or which geography applies when it's not "
+        "specified and matters.\n\n"
+        "Clarification is for missing factual scope, not audience tailoring. Do "
+        "NOT ask who the report is for, what role the reader has, or whether the "
+        "reader is a researcher/developer/user unless the query is explicitly a "
+        "decision-support or recommendation request where that audience would "
+        "change the evaluation criteria, source set, and final answer. For a "
+        "technical/evaluative topic like 'Evaluating X for Y', default to a "
+        "neutral technical assessment and proceed without an audience question.\n\n"
         "Subject/entity identity check (do this FIRST): if the query is a single "
         "word, a short name, an acronym, or a term that could plausibly refer to "
         "more than one distinct real-world entity (a company, product, person, "
@@ -94,9 +101,15 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "(1990-2026)', since the first is just a restatement of the second. Pick "
         "ONE way to describe each distinct time frame and make sure every pair of "
         "options is clearly distinguishable at a glance.\n\n"
-        "Example of a GOOD question for 'How is the SWE job market in Singapore?':\n"
+        "Example of a GOOD question for 'Should I use multi-agent debate in a "
+        "medical QA product?':\n"
+        "  question: 'What deployment context should the evidence prioritize?'\n"
+        "  options: ['Clinical safety', 'Research prototype', 'Cost efficiency', "
+        "'General assessment']\n\n"
+        "Example of a BAD question to NEVER ask for 'Evaluating Multi-Agent Debate "
+        "Systems for Deep Research Quality' (audience tailoring, not missing scope):\n"
         "  question: 'Who is this research for?'\n"
-        "  options: ['Job seeker', 'Employer / hiring', 'Investor', 'General curiosity']\n\n"
+        "  options: ['AI researcher', 'Developer', 'End user', 'Investor']\n\n"
         "Example of a BAD question to NEVER ask (about depth/format, not scope):\n"
         "  question: 'What level of detail do you want?'\n"
         "  options: ['Quick summary', 'Medium detail', 'Deep dive', 'All of the above']\n\n"
@@ -109,7 +122,7 @@ _PROMPT = ChatPromptTemplate.from_messages([
 
 
 def clarify(state: ResearchState) -> dict[str, object]:
-    """Detect ambiguity and store questions+options in state (LLM call — runs ONCE, not on resume)."""
+    """Detect ambiguity and store questions+options in state."""
     # If questions are already stored, a previous run already decided — skip the LLM.
     if state.get("clarification_questions"):
         return {}

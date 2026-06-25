@@ -40,8 +40,14 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "- Use bullet lists ONLY when listing 4+ parallel items that genuinely cannot flow "
         "as prose (e.g. a list of companies, a bare enumeration of data points). "
         "Never use bullets just to paraphrase a prose claim.\n"
-        "- Use numbered lists ONLY for sequential steps or instructions.\n"
+        "- Use numbered lists ONLY for sequential steps or instructions. For conditions, "
+        "limitations, themes, pros/cons, or evidence summaries, use prose paragraphs or "
+        "short bullet lists instead.\n"
         "- Use ## and ### headers to organize sections logically.\n"
+        "- Avoid unexplained acronyms and do not invent short forms. Use the user's "
+        "wording where possible. In particular, do not abbreviate 'multi-agent debate' "
+        "as 'MAD' unless the user used that acronym or a source title requires it; if "
+        "you must use an acronym, define it once and then use it sparingly.\n"
         "- Cite sources inline: place [1], [2], [3] directly after each factual claim "
         "in the sentence. Multiple citations are fine: 'X is true [1][2].'\n"
         "- Citation discipline: only attach [i] to a sentence whose specific claim is "
@@ -67,9 +73,8 @@ _PROMPT = ChatPromptTemplate.from_messages([
         "  [1] [Source Title](url)\n"
         "  [2] [Source Title](url)\n"
         "- If findings are sparse or contradictory, note it explicitly in the report.\n"
-        "- Use **bold** to highlight key statistics, critical conclusions, and the most "
-        "important findings — typically 1–3 phrases per section. Do not bold entire sentences "
-        "or routine facts.",
+        "- Avoid markdown bold in the report body. Let headings and plain prose carry the "
+        "structure; bold makes dense cited reports harder to scan.",
     ),
     (
         "human",

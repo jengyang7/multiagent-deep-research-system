@@ -5,6 +5,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## Git
 
 Never auto-commit or auto-push. All commits and pushes are done by the user.
+Do not run `git commit`, `git push`, or merge branches on the user's behalf by default. If the
+user asks for these actions, provide the exact commands for the user to run instead.
 
 ## Project
 

@@ -268,6 +268,150 @@ async def test_verify_citations_fills_in_missing_reference(
     assert "[1] [A](https://a.com)" not in report
 
 
+async def test_verify_citations_groups_duplicate_reference_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import engine.nodes.verify_citations as verify_mod
+    from eval.schema import FaithfulnessVerdict
+
+    async def fake_checks(
+        report: str, findings: list[object], lead_model: str
+    ) -> tuple[list[FaithfulnessVerdict], list[object], list[object]]:
+        verdicts = [
+            FaithfulnessVerdict(
+                citation_index=1,
+                report_sentence="First claim.",
+                matched_finding_claims=["A claim"],
+                faithful=True,
+                confidence=1.0,
+                reasoning="supported",
+            ),
+            FaithfulnessVerdict(
+                citation_index=2,
+                report_sentence="Second claim.",
+                matched_finding_claims=["B claim"],
+                faithful=True,
+                confidence=1.0,
+                reasoning="supported",
+            ),
+        ]
+        return verdicts, [], []
+
+    monkeypatch.setattr(verify_mod, "run_faithfulness_checks", fake_checks)
+
+    state: ResearchState = {
+        "run_id": str(uuid.uuid4()),
+        "query": "test query",
+        "clarification_questions": [],
+        "clarifications": [],
+        "subtasks": [],
+        "findings": [
+            {
+                "subtask": "q1",
+                "claim": "A claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://same.com",
+            },
+            {
+                "subtask": "q2",
+                "claim": "B claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://same.com",
+            },
+        ],
+        "summary": "summary",
+        "report": (
+            "First claim [1]. Second claim [2].\n\n"
+            "## References\n\n"
+            "[1] [Shared](https://same.com)\n"
+            "[2] [Shared](https://same.com)\n"
+        ),
+        "messages": [],
+    }
+    result = await verify_mod.verify_citations(state)
+    report = str(result["report"])
+    assert "[1], [2] [Shared](https://same.com)" in report
+    assert report.count("https://same.com") == 1
+
+
+async def test_verify_citations_removes_empty_numbered_items_and_bold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import engine.nodes.verify_citations as verify_mod
+    from eval.schema import FaithfulnessVerdict
+
+    async def fake_checks(
+        report: str, findings: list[object], lead_model: str
+    ) -> tuple[list[FaithfulnessVerdict], list[object], list[object]]:
+        verdicts = [
+            FaithfulnessVerdict(
+                citation_index=1,
+                report_sentence="Unsupported first.",
+                matched_finding_claims=[],
+                faithful=False,
+                confidence=1.0,
+                reasoning="unsupported",
+            ),
+            FaithfulnessVerdict(
+                citation_index=2,
+                report_sentence="Kept second.",
+                matched_finding_claims=["B claim"],
+                faithful=True,
+                confidence=1.0,
+                reasoning="supported",
+            ),
+            FaithfulnessVerdict(
+                citation_index=1,
+                report_sentence="Unsupported third.",
+                matched_finding_claims=[],
+                faithful=False,
+                confidence=1.0,
+                reasoning="unsupported",
+            ),
+        ]
+        return verdicts, [], []
+
+    monkeypatch.setattr(verify_mod, "run_faithfulness_checks", fake_checks)
+
+    state: ResearchState = {
+        "run_id": str(uuid.uuid4()),
+        "query": "test query",
+        "clarification_questions": [],
+        "clarifications": [],
+        "subtasks": [],
+        "findings": [
+            {
+                "subtask": "q1",
+                "claim": "A claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://a.com",
+            },
+            {
+                "subtask": "q2",
+                "claim": "B claim",
+                "evidence_span": "evidence",
+                "citation_url": "https://b.com",
+            },
+        ],
+        "summary": "summary",
+        "report": (
+            "1. Unsupported first [1].\n"
+            "2. **Kept second** [2].\n"
+            "3. Unsupported third [1].\n\n"
+            "## References\n\n[1] [A](https://a.com)\n[2] [B](https://b.com)\n"
+        ),
+        "messages": [],
+    }
+    result = await verify_mod.verify_citations(state)
+    report = str(result["report"])
+    assert "1. Kept second [2]." in report
+    assert "2. " not in report
+    assert "3. " not in report
+    assert "**" not in report
+    assert "Unsupported first" not in report
+    assert "Unsupported third" not in report
+
+
 async def test_verify_citations_strips_non_numeric_markers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
